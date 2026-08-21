@@ -4,6 +4,7 @@ package net.psforever.actors.session.support
 import akka.actor.typed.receptionist.Receptionist
 import akka.actor.typed.scaladsl.adapter._
 import akka.actor.{ActorContext, ActorRef, typed}
+import net.psforever.services.base.envelope.MessageEnvelope
 import net.psforever.services.chat.ChatService
 
 import scala.collection.mutable
@@ -31,7 +32,7 @@ import net.psforever.packet._
 import net.psforever.packet.game._
 import net.psforever.services.account.AccountPersistenceService
 import net.psforever.services.ServiceManager.LookupResult
-import net.psforever.services.vehicle.{VehicleAction, VehicleServiceMessage}
+import net.psforever.services.vehicle.VehicleAction
 import net.psforever.services.{Service, InterstellarClusterService => ICS}
 import net.psforever.types._
 import net.psforever.util.Config
@@ -118,6 +119,8 @@ class SessionData(
   def squad: SessionSquadHandlers = squadResponseOpt.orNull
   def zoning: ZoningOperations = zoningOpt.orNull
   def chat: ChatOperations = chatOpt.orNull
+
+  val handlerFilters: CommonHandlerFilters = new CommonHandlerFilters()
 
   ServiceManager.serviceManager ! Lookup("accountIntermediary")
   ServiceManager.serviceManager ! Lookup("accountPersistence")
@@ -422,6 +425,22 @@ class SessionData(
         if (obj.spectator && obj != player) {
           administrativeKick(player)
         } else {
+          if (obj.IsInVRZone && obj.Faction == player.Faction) {
+            //disable self-damage and friendly-fire in VR zones
+            if (obj.CharId != player.CharId) {
+              general.trainingGriefWarning()
+            }
+          } else {
+            obj.Actor ! Vitality.Damage(func)
+          }
+        }
+
+      case obj: AvatarBot if obj.CanDamage && obj.Actor != Default.Actor =>
+        log.info(s"${player.Name} is attacking ${obj.Name}")
+        if (obj.IsInVRZone && obj.Faction == player.Faction) {
+          //disable friendly-fire in VR zones
+          general.trainingGriefWarning()
+        } else {
           obj.Actor ! Vitality.Damage(func)
         }
 
@@ -433,10 +452,21 @@ class SessionData(
         } else {
           log.info(s"$name is attacking $ownerName's ${obj.Definition.Name}")
         }
-        obj.Actor ! Vitality.Damage(func)
+        if (obj.IsInVRZone && obj.Faction == player.Faction) {
+          //disable self-damage and friendly-fire in VR zones
+          if (!ownerName.equals(name)) {
+            general.trainingGriefWarning()
+          }
+        } else {
+          obj.Actor ! Vitality.Damage(func)
+        }
 
       case obj: Amenity if obj.CanDamage =>
-        obj.Actor ! Vitality.Damage(func)
+        if (obj.IsInVRZone && obj.Faction == player.Faction) {
+          //disable friendly-fire in VR zones
+        } else {
+          obj.Actor ! Vitality.Damage(func)
+        }
 
       case obj: Deployable if obj.CanDamage =>
         val name = player.Name
@@ -466,7 +496,14 @@ class SessionData(
     zoning.spawn.interimUngunnedVehicle = None
     persist()
     if (player.HasGUID) {
+      zoning.spawn.tryQueuedActivity(player.Velocity)
       turnCounterFunc(player.GUID)
+      continent
+        .GUID(player.VehicleSeated)
+        .collect { case v: PlanetSideGameObject with Mountable =>
+          VehicleOperations.updateMountableZoneInteractionFromEarliestSeat(v, player)
+        }
+      squad.updateSquad()
     } else {
       turnCounterFunc(PlanetSideGUID(0))
     }
@@ -533,9 +570,10 @@ class SessionData(
       case (Some(obj), Some(seatNum)) =>
         tplayer.VehicleSeated = None
         obj.Seats(seatNum).unmount(tplayer)
-        continent.VehicleEvents ! VehicleServiceMessage(
+        continent.VehicleEvents ! MessageEnvelope(
           continent.id,
-          VehicleAction.KickPassenger(tplayer.GUID, seatNum, unk2=false, obj.GUID)
+          tplayer.GUID,
+          VehicleAction.KickPassenger(seatNum, unk2=false, obj.GUID)
         )
       case _ => ()
     }
@@ -581,12 +619,12 @@ class SessionData(
     squadResponseOpt.foreach(_.stop())
     zoningOpt.foreach(_.stop())
     chatOpt.foreach(_.stop())
-    continent.AvatarEvents ! Service.Leave()
-    continent.LocalEvents ! Service.Leave()
-    continent.VehicleEvents ! Service.Leave()
-    galaxyService ! Service.Leave()
+    continent.AvatarEvents ! Service.LeaveAll
+    continent.LocalEvents ! Service.LeaveAll
+    continent.VehicleEvents ! Service.LeaveAll
+    galaxyService ! Service.LeaveAll
     if (avatar != null && squadService != Default.Actor) {
-      squadService ! Service.Leave()
+      squadService ! Service.LeaveAll
     }
   }
 }

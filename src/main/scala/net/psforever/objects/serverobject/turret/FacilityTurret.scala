@@ -3,19 +3,47 @@ package net.psforever.objects.serverobject.turret
 
 import net.psforever.objects.equipment.JammableUnit
 import net.psforever.objects.serverobject.interior.Sidedness
+import net.psforever.objects.serverobject.mount.interaction.InteractWithRadiationCloudsSeatedInEntity
 import net.psforever.objects.serverobject.structures.{Amenity, AmenityOwner, Building}
 import net.psforever.objects.serverobject.terminals.capture.CaptureTerminalAware
 import net.psforever.objects.serverobject.turret.auto.AutomatedTurret
 import net.psforever.objects.sourcing.SourceEntry
+import net.psforever.objects.vital.resistance.StandardResistanceProfile
+import net.psforever.objects.zones.interaction.InteractsWithZone
 import net.psforever.types.Vector3
 
 class FacilityTurret(tDef: FacilityTurretDefinition)
   extends Amenity
     with AutomatedTurret
+    with StandardResistanceProfile
     with JammableUnit
+    with InteractsWithZone
     with CaptureTerminalAware {
+  interaction(new InteractWithRadiationCloudsSeatedInEntity(obj = this, range = 100f))
   WeaponTurret.LoadDefinition(turret = this)
   WhichSide = Sidedness.OutsideOf
+
+  private var turretUpgradeTime: Long = System.currentTimeMillis()
+  private var turretUpgradeTimeSet: Boolean = false
+
+  def UpdateTurretUpgradeTime(): Long = {
+    turretUpgradeTime = System.currentTimeMillis()
+    turretUpgradeTimeSet = true
+    turretUpgradeTime
+  }
+
+  // Used for checking the time without updating it
+  def CheckTurretUpgradeTime: Long = {
+    if (!turretUpgradeTimeSet) {
+      turretUpgradeTime = System.currentTimeMillis()
+      turretUpgradeTimeSet = true
+    }
+    turretUpgradeTime
+  }
+
+  def FinishedTurretUpgradeReset(): Unit = {
+    turretUpgradeTimeSet = false
+  }
 
   def TurretOwner: SourceEntry = {
     Seats

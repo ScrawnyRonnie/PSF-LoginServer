@@ -8,13 +8,17 @@ import net.psforever.actors.session.support.{ChatFunctions, ChatOperations, Sess
 import net.psforever.objects.{GlobalDefinitions, PlanetSideGameObject, Session, TurretDeployable}
 import net.psforever.objects.ce.{Deployable, DeployableCategory}
 import net.psforever.objects.serverobject.affinity.FactionAffinity
+import net.psforever.objects.serverobject.dome.ForceDomeControl
 import net.psforever.objects.serverobject.{CommonMessages, PlanetSideServerObject}
 import net.psforever.objects.serverobject.hackable.Hackable
+import net.psforever.objects.serverobject.interior.Sidedness
 import net.psforever.objects.serverobject.structures.Building
 import net.psforever.objects.zones.Zone
 import net.psforever.packet.game.{ChatMsg, SetChatFilterMessage}
 import net.psforever.services.Service
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
+import net.psforever.services.avatar.AvatarAction
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.{ObjectDelete, SetEmpire}
 import net.psforever.services.chat.{ChatChannel, DefaultChannel, SpectatorChannel, SquadChannel}
 import net.psforever.types.ChatMessageType.{CMT_TOGGLESPECTATORMODE, CMT_TOGGLE_GM}
 import net.psforever.types.{ChatMessageType, PlanetSideEmpire}
@@ -96,6 +100,12 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
 
       case (CMT_CAPTUREBASE, _, contents) =>
         ops.commandCaptureBase(session, message, contents)
+
+      case (CMT_SETTIME, _, contents) =>
+        ops.commandSetTime(session, contents)
+
+      case (CMT_SETTIMESPEED, _, contents) =>
+        ops.commandSetTimeSpeed(session, contents)
 
       case (CMT_GMBROADCAST | CMT_GMBROADCAST_NC | CMT_GMBROADCAST_VS | CMT_GMBROADCAST_TR, _, _) =>
         ops.commandSendToRecipient(session, message, comms)
@@ -227,6 +237,8 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
         case "sayspectator" => customCommandSpeakAsSpectator(params, message)
         case "setempire" => customCommandSetEmpire(params)
         case "weaponlock" => customCommandZoneWeaponUnlock(session, params)
+        case "forcedome" => customForceDomeCommand(session, params)
+        case "setside" => customSetSidedness(session, params)
         case _ =>
           // command was not handled
           sendResponse(
@@ -302,17 +314,20 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
     val events = continent.AvatarEvents
     seeSpectatorsIn = Some(continent)
     events ! Service.Join(s"spectator")
-    continent
-      .AllPlayers
-      .filter(_.spectator)
-      .foreach { spectator =>
-        val guid = spectator.GUID
-        val definition = spectator.Definition
-        events ! AvatarServiceMessage(
-          channel,
-          AvatarAction.LoadPlayer(guid, definition.ObjectId, guid, definition.Packet.ConstructorData(spectator).get, None)
-        )
-      }
+    events ! BundledEnvelope(
+      continent
+        .AllPlayers
+        .filter(_.spectator)
+        .map { spectator =>
+          val guid = spectator.GUID
+          val definition = spectator.Definition
+          MessageEnvelope(
+            channel,
+            guid,
+            AvatarAction.LoadPlayer(definition.ObjectId, guid, definition.Packet.ConstructorData(spectator).get, None)
+          )
+        }
+    )
     true
   }
 
@@ -320,17 +335,16 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
     val channel = player.Name
     val events = continent.AvatarEvents
     seeSpectatorsIn = None
-    events ! Service.Leave(Some("spectator"))
-    continent
-      .AllPlayers
-      .filter(_.spectator)
-      .foreach { spectator =>
-        val guid = spectator.GUID
-        events ! AvatarServiceMessage(
-          channel,
-          AvatarAction.ObjectDelete(guid, guid)
-        )
-      }
+    events ! Service.Leave("spectator")
+    events ! BundledEnvelope(
+      continent
+        .AllPlayers
+        .filter(_.spectator)
+        .map { spectator =>
+          val guid = spectator.GUID
+          MessageEnvelope(channel, guid, ObjectDelete(guid))
+        }
+    )
     true
   }
 
@@ -382,9 +396,9 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
           true
         case o: Deployable =>
           o.Faction = foundFaction
-          continent.AvatarEvents ! AvatarServiceMessage(
+          continent.AvatarEvents ! MessageEnvelope(
             continent.id,
-            AvatarAction.SetEmpire(Service.defaultPlayerGUID, o.GUID, foundFaction)
+            SetEmpire(o.GUID, foundFaction)
           )
           true
         case o: Building =>
@@ -395,9 +409,9 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
           true
         case o: PlanetSideGameObject with FactionAffinity =>
           o.Faction = foundFaction
-          continent.AvatarEvents ! AvatarServiceMessage(
+          continent.AvatarEvents ! MessageEnvelope(
             continent.id,
-            AvatarAction.SetEmpire(Service.defaultPlayerGUID, o.GUID, foundFaction)
+            SetEmpire(o.GUID, foundFaction)
           )
           true
       }
@@ -502,9 +516,72 @@ class ChatLogic(val ops: ChatOperations, implicit val context: ActorContext) ext
           .foreach {
             case (_, false, _) => ()
             case (faction, true, _) =>
-              //events ! AvatarServiceMessage(s"$faction", reloadZoneMsg)
+              //events ! MessageEnvelope(s"$faction", reloadZoneMsg)
           }
       }
+    }
+    true
+  }
+
+  private def customForceDomeCommand(session: Session, contents: Seq[String]): Boolean = {
+    //locate force dome
+    var postUsageMessage: Boolean = false
+    val locatedForceDomesInZone = session.zone.Buildings.values.flatMap(_.ForceDome)
+    if (locatedForceDomesInZone.nonEmpty) {
+      contents
+        .headOption
+        .map(_.toLowerCase())
+        .collect {
+          case "on" | "o" | "" =>
+            locatedForceDomesInZone.foreach(_.Actor ! ForceDomeControl.CustomExpand)
+          case "off" | "of" =>
+            locatedForceDomesInZone.foreach(_.Actor ! ForceDomeControl.CustomCollapse)
+          case "protect" =>
+            locatedForceDomesInZone.foreach(_.Actor ! ForceDomeControl.ApplyProtection)
+          case "normal" =>
+            locatedForceDomesInZone.foreach(_.Actor ! ForceDomeControl.NormalBehavior)
+          case "purge" =>
+            locatedForceDomesInZone.foreach(_.Actor ! ForceDomeControl.Purge)
+          case "help" | "usage" =>
+            postUsageMessage = true
+          case token =>
+            sendResponse(ChatMsg(ChatMessageType.UNK_227, s"unknown command - $token"))
+            postUsageMessage = true
+        }
+      if (postUsageMessage) {
+        sendResponse(ChatMsg(ChatMessageType.UNK_227, "!forcedome [o[n]|of[f]|protect|normal|purge]"))
+      }
+    } else {
+      //no force domes in zone
+      sendResponse(ChatMsg(ChatMessageType.UNK_227, "no capitol force dome(s) detected in zone"))
+    }
+    true
+  }
+
+  private def customSetSidedness(session: Session, contents: Seq[String]): Boolean = {
+    var postUsageMessage: Boolean = false
+    contents.headOption match {
+      case Some(side) if side.matches("i|in|inside") =>
+        ops.customSetSidednessOfTarget(session.player, Sidedness.InsideOf)
+      case Some(side) if side.matches("o|out|outside") =>
+        ops.customSetSidednessOfTarget(session.player, Sidedness.OutsideOf)
+      case Some("check") =>
+        val whichSide = if (session.player.WhichSide == Sidedness.OutsideOf) {
+          "outside"
+        } else {
+          "inside"
+        }
+        sendResponse(ChatMsg(ChatMessageType.UNK_227, s"You are $whichSide."))
+      case Some("help") | Some("usage") =>
+        postUsageMessage = true
+      case Some(token) =>
+        sendResponse(ChatMsg(ChatMessageType.UNK_227, s"unknown command - $token"))
+        postUsageMessage = true
+      case None =>
+        postUsageMessage = true
+    }
+    if (postUsageMessage) {
+      sendResponse(ChatMsg(ChatMessageType.UNK_227, "!setside i[n[side]]|o[ut[side]]|check"))
     }
     true
   }

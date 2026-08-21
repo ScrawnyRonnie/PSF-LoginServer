@@ -6,7 +6,7 @@ import akka.actor.{ActorContext, ActorRef, typed}
 import net.psforever.actors.session.{AvatarActor, SessionActor}
 import net.psforever.actors.session.support.{GeneralFunctions, GeneralOperations, SessionData, SessionOutfitHandlers}
 import net.psforever.objects.{Account, BoomerDeployable, BoomerTrigger, ConstructionItem, GlobalDefinitions, LivePlayerList, Player, SensorDeployable, ShieldGeneratorDeployable, SpecialEmp, TelepadDeployable, Tool, TrapDeployable, TurretDeployable, Vehicle}
-import net.psforever.objects.avatar.{Avatar, PlayerControl, SpecialCarry}
+import net.psforever.objects.avatar.{Avatar, AvatarBot, PlayerControl, SpecialCarry}
 import net.psforever.objects.ballistics.Projectile
 import net.psforever.objects.ce.{Deployable, DeployedItem}
 import net.psforever.objects.definition.{BasicDefinition, KitDefinition, SpecialExoSuitDefinition}
@@ -16,12 +16,15 @@ import net.psforever.objects.inventory.Container
 import net.psforever.objects.serverobject.{PlanetSideServerObject, ServerObject}
 import net.psforever.objects.serverobject.affinity.FactionAffinity
 import net.psforever.objects.serverobject.containable.Containable
+import net.psforever.objects.serverobject.damage.Damageable
+import net.psforever.objects.serverobject.dome.ForceDomePhysics
 import net.psforever.objects.serverobject.doors.Door
 import net.psforever.objects.serverobject.generator.Generator
 import net.psforever.objects.serverobject.interior.Sidedness.OutsideOf
 import net.psforever.objects.serverobject.llu.CaptureFlag
 import net.psforever.objects.serverobject.locks.IFFLock
 import net.psforever.objects.serverobject.mblocker.Locker
+import net.psforever.objects.serverobject.mount.MountableEntity
 import net.psforever.objects.serverobject.resourcesilo.ResourceSilo
 import net.psforever.objects.serverobject.structures.WarpGate
 import net.psforever.objects.serverobject.terminals.capture.CaptureTerminal
@@ -29,18 +32,19 @@ import net.psforever.objects.serverobject.terminals.{ProximityUnit, Terminal}
 import net.psforever.objects.serverobject.terminals.implant.ImplantTerminalMech
 import net.psforever.objects.serverobject.tube.SpawnTube
 import net.psforever.objects.serverobject.turret.FacilityTurret
-import net.psforever.objects.sourcing.SourceEntry
+import net.psforever.objects.sourcing.{PlayerSource, SourceEntry}
 import net.psforever.objects.vehicles.Utility
 import net.psforever.objects.vital.Vitality
 import net.psforever.objects.vital.collision.{CollisionReason, CollisionWithReason}
-import net.psforever.objects.vital.etc.SuicideReason
+import net.psforever.objects.vital.etc.{ForceDomeExposure, SuicideReason}
 import net.psforever.objects.vital.interaction.DamageInteraction
 import net.psforever.objects.zones.{ZoneProjectile, Zoning}
 import net.psforever.packet.PlanetSideGamePacket
 import net.psforever.packet.game.{ActionCancelMessage, ActionResultMessage, AvatarFirstTimeEventMessage, AvatarImplantMessage, AvatarJumpMessage, BattleplanMessage, BindPlayerMessage, BugReportMessage, ChangeFireModeMessage, ChangeShortcutBankMessage, CharacterCreateRequestMessage, CharacterRequestAction, CharacterRequestMessage, ChatMsg, CollisionIs, ConnectToWorldRequestMessage, CreateShortcutMessage, DeadState, DeployObjectMessage, DisplayedAwardMessage, DropItemMessage, EmoteMsg, FacilityBenefitShieldChargeRequestMessage, FriendsRequest, GenericAction, GenericActionMessage, GenericCollisionMsg, GenericObjectActionAtPositionMessage, GenericObjectActionMessage, GenericObjectStateMsg, HitHint, InvalidTerrainMessage, LootItemMessage, MoveItemMessage, ObjectDetectedMessage, ObjectHeldMessage, OutfitMembershipRequest, OutfitMembershipRequestAction, OutfitMembershipResponse, OutfitRequest, OutfitRequestAction, PickupItemMessage, PlanetsideAttributeMessage, PlayerStateMessageUpstream, RequestDestroyMessage, TargetingImplantRequest, TerrainCondition, TradeMessage, UnuseItemMessage, UseItemMessage, VoiceHostInfo, VoiceHostRequest, ZipLineMessage}
 import net.psforever.services.account.{AccountPersistenceService, RetrieveAccountData}
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.avatar.AvatarAction
+import net.psforever.services.base.envelope.MessageEnvelope
+import net.psforever.services.base.message.PlanetsideAttribute
 import net.psforever.services.local.support.CaptureFlagManager
 import net.psforever.types.{CapacitorStateType, ChatMessageType, Cosmetic, ExoSuitType, ImplantType, PlanetSideEmpire, PlanetSideGUID, Vector3}
 import net.psforever.util.Config
@@ -166,11 +170,20 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
     //
     val eagleEye: Boolean = ops.canSeeReallyFar
     val isNotVisible: Boolean = sessionLogic.zoning.zoningStatus == Zoning.Status.Deconstructing ||
-      (player.isAlive && sessionLogic.zoning.spawn.deadState == DeadState.RespawnTime)
-    continent.AvatarEvents ! AvatarServiceMessage(
+      (player.isAlive && sessionLogic.zoning.spawn.deadState == DeadState.RespawnTime) ||
+      (sessionLogic.zoning.spawn.ShiftPosition match {
+        case Some(position) if Vector3.DistanceSquared(position, pos) < 25f =>
+          sessionLogic.zoning.spawn.ShiftPosition = None
+          false
+        case Some(_) =>
+          true
+        case _ =>
+          false
+      })
+    continent.AvatarEvents ! MessageEnvelope(
       continent.id,
+      avatarGuid,
       AvatarAction.PlayerState(
-        avatarGuid,
         player.Position,
         player.Velocity,
         yaw,
@@ -184,7 +197,7 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
         isNotVisible,
         eagleEye
       )
-    )
+    ) //todo CachedMessage
     sessionLogic.squad.updateSquad()
     if (player.death_by == -1) {
       sessionLogic.kickedByAdministration()
@@ -201,15 +214,8 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
   }
 
   def handleEmote(pkt: EmoteMsg): Unit = {
-    val EmoteMsg(avatarGuid, emote) = pkt
-    val pZone = player.Zone
-    sendResponse(EmoteMsg(avatarGuid, emote))
-    pZone.blockMap.sector(player).livePlayerList.collect { case t if t.GUID != player.GUID =>
-      pZone.LocalEvents ! LocalServiceMessage(t.Name, LocalAction.SendResponse(EmoteMsg(avatarGuid, emote)))
-    }
-    pZone.AllPlayers.collect { case t if t.GUID != player.GUID && !t.allowInteraction =>
-      pZone.LocalEvents ! LocalServiceMessage(t.Name, LocalAction.SendResponse(EmoteMsg(avatarGuid, emote)))
-    }
+    sendResponse(pkt)
+    ops.handleEmote(pkt)
   }
 
   def handleDropItem(pkt: DropItemMessage): Unit = {
@@ -353,6 +359,8 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
         ops.handleUseGeneralEntity(panel, equipment)
       case Some(obj: Player) =>
         ops.handleUsePlayer(obj, equipment, pkt)
+      case Some(obj: AvatarBot) =>
+        ops.handleUseBot(obj, equipment, pkt)
       case Some(locker: Locker) =>
         ops.handleUseLocker(locker, equipment, pkt)
       case Some(gen: Generator) =>
@@ -511,9 +519,10 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
         case GenericAction.MaxAnchorsExtend_RCV =>
           log.info(s"${player.Name} has anchored ${player.Sex.pronounObject}self to the ground")
           player.UsingSpecial = SpecialExoSuitDefinition.Mode.Anchored
-          continent.AvatarEvents ! AvatarServiceMessage(
+          continent.AvatarEvents ! MessageEnvelope(
             continent.id,
-            AvatarAction.PlanetsideAttribute(player.GUID, 19, 1)
+            player.GUID,
+            PlanetsideAttribute(player.GUID, 19, 1)
           )
           definition match {
             case GlobalDefinitions.trhev_dualcycler | GlobalDefinitions.trhev_burster =>
@@ -532,9 +541,10 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
         case GenericAction.MaxAnchorsRelease_RCV =>
           log.info(s"${player.Name} has released the anchors")
           player.UsingSpecial = SpecialExoSuitDefinition.Mode.Normal
-          continent.AvatarEvents ! AvatarServiceMessage(
+          continent.AvatarEvents ! MessageEnvelope(
             continent.id,
-            AvatarAction.PlanetsideAttribute(player.GUID, 19, 0)
+            player.GUID,
+            PlanetsideAttribute(player.GUID, 19, 0)
           )
           definition match {
             case GlobalDefinitions.trhev_dualcycler | GlobalDefinitions.trhev_burster =>
@@ -586,6 +596,10 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
           if (avatar.lookingForSquad && (sessionLogic.squad.squadUI.isEmpty || sessionLogic.squad.squadUI(player.CharId).index == 0)) {
             avatarActor ! AvatarActor.SetLookingForSquad(false)
           }
+        case GenericAction.MaxEnableAutoRun =>
+          player.maxAutoRunEnabled = true
+        case GenericAction.MaxDisableAutoRun =>
+          player.maxAutoRunEnabled = false
         case _ =>
           log.warn(s"GenericActionMessage: ${player.Name} can't handle $action")
       }
@@ -632,10 +646,15 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
       case (CollisionIs.OfAircraft, out @ Some(v: Vehicle))
         if v.Definition.CanFly && v.Seats(0).occupant.contains(player) =>
         (out, sessionLogic.validObject(t, decorator = "GenericCollision/Aircraft"), false, pv)
-      case (CollisionIs.BetweenThings, _) =>
-        log.warn("GenericCollision: CollisionIs.BetweenThings detected - no handling case")
+      case (CollisionIs.BetweenThings, out @ Some(target: PlanetSideServerObject with MountableEntity)) =>
+        target.BailProtection = false
+        player.BailProtection = false
+        (out, sessionLogic.validObject(t, decorator = "GenericCollision/Surface"), false, pv)
+      case (_, Some(obj)) =>
+        log.error(s"GenericCollision: $ctype detected: no handling case for ${obj.Definition.Name}")
         (None, None, false, Vector3.Zero)
-      case _ =>
+      case (_, None) =>
+        log.error(s"GenericCollision: $ctype detected: no entity detected as 'Primary'")
         (None, None, false, Vector3.Zero)
     }
     val curr = System.currentTimeMillis()
@@ -656,6 +675,16 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
             )
           }
         }
+
+      case (Some(us: PlanetSideServerObject with Vitality with FactionAffinity), _, Some(field: ForceDomePhysics)) =>
+        us.Actor ! Damageable.MakeVulnerable
+        us.Actor ! Vitality.Damage(
+          DamageInteraction(
+            PlayerSource(player),
+            ForceDomeExposure(SourceEntry(field)),
+            player.Position
+          ).calculate()
+        )
 
       case (Some(us: Vehicle), _, Some(victim: SensorDeployable)) =>
         collisionBetweenVehicleAndFragileDeployable(us, ppos, victim, tpos, velocity - tv, fallHeight, curr)
@@ -833,7 +862,7 @@ class GeneralLogic(val ops: GeneralOperations, implicit val context: ActorContex
     pkt match {
 
       case OutfitRequest(_, OutfitRequestAction.Motd(message)) =>
-        SessionOutfitHandlers.HandleOutfitMotd(zones, message, player)
+        //SessionOutfitHandlers.HandleOutfitMotd(zones, message, player)
 
       case OutfitRequest(_, OutfitRequestAction.Ranks(List(r1, r2, r3, r4, r5, r6, r7, r8))) =>
         SessionOutfitHandlers.HandleOutfitRank(zones, List(r1, r2, r3, r4, r5, r6, r7, r8), player)

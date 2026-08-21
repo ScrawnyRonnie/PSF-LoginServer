@@ -9,6 +9,7 @@ import net.psforever.objects.ballistics.ProjectileQuality
 import net.psforever.objects.definition.{ProjectileDefinition, SpecialExoSuitDefinition}
 import net.psforever.objects.entity.SimpleWorldEntity
 import net.psforever.objects.equipment.{ChargeFireModeDefinition, Equipment, FireModeSwitch}
+import net.psforever.objects.geometry.d3.{Point, VolumetricGeometry}
 import net.psforever.objects.guid.{GUIDTask, TaskBundle, TaskWorkflow}
 import net.psforever.objects.serverobject.{CommonMessages, PlanetSideServerObject}
 import net.psforever.objects.serverobject.affinity.FactionAffinity
@@ -26,7 +27,9 @@ import net.psforever.objects.vital.interaction.DamageInteraction
 import net.psforever.objects.vital.projectile.ProjectileReason
 import net.psforever.objects.zones.exp.ToDatabase
 import net.psforever.packet.game.UplinkRequest
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.base.CachedEnvelope
+import net.psforever.services.base.envelope.MessageEnvelope
+import net.psforever.services.base.message.{ChangeAmmo, ChangeFireState_Start, ChangeFireState_Stop, ReloadTool, SendResponse, WeaponDryFire}
 import net.psforever.types.{ChatMessageType, PlanetSideEmpire, ValidPlanetSideGUID, Vector3}
 import net.psforever.util.Config
 
@@ -44,8 +47,8 @@ import net.psforever.objects.serverobject.mount.Mountable
 import net.psforever.objects.serverobject.turret.FacilityTurret
 import net.psforever.objects._
 import net.psforever.packet.game._
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
-import net.psforever.services.vehicle.{VehicleAction, VehicleServiceMessage}
+import net.psforever.services.avatar.AvatarAction
+import net.psforever.services.vehicle.VehicleAction
 import net.psforever.types.{ExoSuitType, PlanetSideGUID}
 
 trait WeaponAndProjectileFunctions extends CommonSessionInterfacingFunctionality {
@@ -280,14 +283,12 @@ class WeaponAndProjectileOperations(
       .orElse { continent.GUID(weapon_guid) }
       .collect {
         case _: Equipment if containerOpt.exists(_.isInstanceOf[Player]) =>
-          continent.AvatarEvents ! AvatarServiceMessage(
-            continent.id,
-            AvatarAction.WeaponDryFire(player.GUID, weapon_guid)
-          )
+          continent.AvatarEvents ! MessageEnvelope(continent.id, player.GUID, WeaponDryFire(weapon_guid))
         case _: Equipment =>
-          continent.VehicleEvents ! VehicleServiceMessage(
+          continent.VehicleEvents ! MessageEnvelope(
             continent.id,
-            VehicleAction.WeaponDryFire(player.GUID, weapon_guid)
+            player.GUID,
+            WeaponDryFire(weapon_guid)
           )
       }
       .orElse {
@@ -347,14 +348,21 @@ class WeaponAndProjectileOperations(
       sendResponse(UplinkResponse(code.value, 0))
       sendResponse(PlanetsideAttributeMessage(player.GUID, 59, 1200000))
       avatarActor ! AvatarActor.UpdateCUDTime("emp_blast")
-      player.Zone.LocalEvents ! LocalServiceMessage(s"${player.Zone.id}",
-        LocalAction.SendPacket(TriggerEffectMessage(ValidPlanetSideGUID(0), empColor, None, Some(TriggeredEffectLocation(player.Position, Vector3(0, 0, 90))))))
+      player.Zone.LocalEvents ! MessageEnvelope(
+        s"${player.Zone.id}",
+        PlanetSideGUID(-1),
+        SendResponse(TriggerEffectMessage(Default.GUID0, empColor, None, Some(TriggeredEffectLocation(player.Position, Vector3(0, 0, 90)))))
+      )
       context.system.scheduler.scheduleOnce(delay = 1 seconds) {
         Zone.serverSideDamage(player.Zone, player, empSize, SpecialEmp.createEmpInteraction(empSize, player.Position),
           ExplosiveDeployableControl.detectionForExplosiveSource(player), Zone.findAllTargets)
         }
     case UplinkRequestType.OrbitalStrike =>
-      player.Zone.LocalEvents ! LocalServiceMessage(s"$playerFaction", LocalAction.SendPacket(OrbitalStrikeWaypointMessage(player.GUID, pos.get.x, pos.get.y)))
+      player.Zone.LocalEvents ! MessageEnvelope(
+        s"$playerFaction",
+        PlanetSideGUID(-1),
+        SendResponse(OrbitalStrikeWaypointMessage(player.GUID, pos.get.x, pos.get.y))
+      )
       sendResponse(UplinkResponse(code.value, 0))
       orbitalStrikePos = pos
     case UplinkRequestType.Unknown5 =>
@@ -379,9 +387,16 @@ class WeaponAndProjectileOperations(
       sendResponse(PlanetsideAttributeMessage(player.GUID, 60, 10800000))
       avatarActor ! AvatarActor.UpdateCUDTime("orbital_strike")
       context.system.scheduler.scheduleOnce(delay = 5 seconds) {
-        player.Zone.LocalEvents ! LocalServiceMessage(s"${player.Zone.id}",
-          LocalAction.SendPacket(TriggerEffectMessage(ValidPlanetSideGUID(0), strikeType, None, Some(TriggeredEffectLocation(orbitalStrikePos.get, Vector3(0, 0, 90))))))
-        player.Zone.LocalEvents ! LocalServiceMessage(s"$playerFaction", LocalAction.SendPacket(OrbitalStrikeWaypointMessage(player.GUID, None)))
+        player.Zone.LocalEvents ! MessageEnvelope(
+          s"${player.Zone.id}",
+          PlanetSideGUID(-1),
+          SendResponse(TriggerEffectMessage(ValidPlanetSideGUID(0), strikeType, None, Some(TriggeredEffectLocation(orbitalStrikePos.get, Vector3(0, 0, 90)))))
+        )
+        player.Zone.LocalEvents ! MessageEnvelope(
+          s"$playerFaction",
+          PlanetSideGUID(-1),
+          SendResponse(OrbitalStrikeWaypointMessage(player.GUID, None))
+        )
         context.system.scheduler.scheduleOnce(delay = 5 seconds) {
         val sectorTargets = Zone.findOrbitalStrikeTargets(player.Zone, orbitalStrikePos.get, osSize.DamageRadius, Zone.getOrbitbalStrikeTargets)
         val withinRange = sectorTargets.filter { target => Zone.orbitalStrikeDistanceCheck(orbitalStrikePos.get, target.Position, osSize.DamageRadius) }
@@ -408,7 +423,8 @@ class WeaponAndProjectileOperations(
     } else {
       equipment foreach {
         case obj: ConstructionItem =>
-          if (Deployables.performConstructionItemAmmoChange(player.avatar.certifications, obj, obj.AmmoTypeIndex)) {
+          val certifications = if (player.IsInVRZone) GlobalDefinitions.vrZoneTempEngineeringCerts() else player.avatar.certifications
+          if (Deployables.performConstructionItemAmmoChange(certifications, obj, obj.AmmoTypeIndex)) {
             log.info(
               s"${player.Name} switched ${player.Sex.possessive} ${obj.Definition.Name} to construct ${obj.AmmoType} (option #${obj.FireModeIndex})"
             )
@@ -436,8 +452,9 @@ class WeaponAndProjectileOperations(
         val originalModeIndex = obj.FireModeIndex
         if (obj match {
           case citem: ConstructionItem =>
+            val certifications = if (player.IsInVRZone) GlobalDefinitions.vrZoneTempEngineeringCerts() else player.avatar.certifications
             val modeChanged = Deployables.performConstructionItemFireModeChange(
-              player.avatar.certifications,
+              certifications,
               citem,
               originalModeIndex
             )
@@ -454,9 +471,10 @@ class WeaponAndProjectileOperations(
               log.info(s"${player.Name} changed ${player.Sex.possessive} ${obj.Definition.Name}'s fire mode to #$modeIndex")
           }
           sendResponse(ChangeFireModeMessage(item_guid, modeIndex))
-          continent.AvatarEvents ! AvatarServiceMessage(
+          continent.AvatarEvents ! MessageEnvelope(
             sessionLogic.zoning.zoneChannel,
-            AvatarAction.ChangeFireMode(player.GUID, item_guid, modeIndex)
+            player.GUID,
+            AvatarAction.ChangeFireMode(item_guid, modeIndex)
           )
         }
       case Some(_) =>
@@ -475,10 +493,10 @@ class WeaponAndProjectileOperations(
         projectile.Position = shot_pos
         projectile.Orientation = shot_orient
         projectile.Velocity = shot_vel
-        continent.AvatarEvents ! AvatarServiceMessage(
+        continent.AvatarEvents ! CachedEnvelope(
           continent.id,
+          player.GUID,
           AvatarAction.ProjectileState(
-            player.GUID,
             projectileGlobalUID,
             shot_pos,
             shot_vel,
@@ -512,6 +530,7 @@ class WeaponAndProjectileOperations(
           hit_info match {
             case Some(hitInfo) =>
               val hitPos = hitInfo.hit_pos
+              projectile.Position = hitPos
               sessionLogic.validObject(hitInfo.hitobject_guid, decorator = "Hit/hitInfo") match {
                 case _ if projectile.profile == GlobalDefinitions.flail_projectile =>
                   val radius = projectile.profile.DamageRadius * projectile.profile.DamageRadius
@@ -521,7 +540,7 @@ class WeaponAndProjectileOperations(
                     .map(target => (target, projectile, hitPos, target.Position))
 
                 case Some(target: PlanetSideGameObject with FactionAffinity with Vitality) =>
-                  List((target, projectile, hitInfo.shot_origin, hitPos))
+                  List((target, projectile, hitPos, target.Position))
 
                 case None =>
                   Nil
@@ -584,7 +603,9 @@ class WeaponAndProjectileOperations(
     FindProjectileEntry(projectile_guid)
       .flatMap {
         projectile =>
-        sessionLogic
+          //projectile may still be moving, and may lash other targets in the future when in a different position
+          projectile.Position = hit_pos
+          sessionLogic
             .validObject(victim_guid, decorator = "LashHit/victim_guid")
             .collect {
               case target: PlanetSideGameObject with FactionAffinity with Vitality =>
@@ -662,12 +683,19 @@ class WeaponAndProjectileOperations(
                          projectileGuid: PlanetSideGUID,
                          explosionPosition: Vector3
                        ):  List[(PlanetSideGameObject with FactionAffinity with Vitality, Projectile, Vector3, Vector3)] = {
-    val proxyList = FindProjectileEntry(projectileGuid)
+    FindProjectileEntry(projectileGuid)
       .map(projectile => resolveDamageProxy(projectile, projectile.GUID, explosionPosition))
       .getOrElse(Nil)
+  }
+
+  private def handleProxyDamage(
+                                 projectile: Projectile,
+                                 explosionPosition: Vector3
+                               ):  List[(PlanetSideGameObject with FactionAffinity with Vitality, Projectile, Vector3, Vector3)] = {
+    val proxyList = resolveDamageProxy(projectile, projectile.GUID, explosionPosition)
     proxyList.collectFirst {
       case (_, proxy, _, _) if proxy.profile == GlobalDefinitions.oicw_little_buddy =>
-        performLittleBuddyExplosion(proxyList.map(_._2))
+        queueLittleBuddyExplosion(proxy)
     }
     proxyList
   }
@@ -695,35 +723,46 @@ class WeaponAndProjectileOperations(
       case list =>
         setupDamageProxyLittleBuddy(list, hitPos)
         WeaponAndProjectileOperations.updateProjectileSidednessAfterHit(continent, projectile, hitPos)
-        val projectileSide = projectile.WhichSide
         list.flatMap { proxy =>
-          if (proxy.profile.ExistsOnRemoteClients) {
+          if (proxy.profile == GlobalDefinitions.oicw_little_buddy) {
+            proxy.WhichSide = projectile.WhichSide
+            continent.Projectile ! ZoneProjectile.Add(player.GUID, proxy)
+            queueLittleBuddyExplosion(proxy)
+            Nil
+          } else if (proxy.profile.ExistsOnRemoteClients) {
             proxy.Position = hitPos
-            proxy.WhichSide = projectileSide
+            proxy.WhichSide = projectile.WhichSide
             continent.Projectile ! ZoneProjectile.Add(player.GUID, proxy)
             Nil
           } else if (proxy.tool_def == GlobalDefinitions.maelstrom) {
             //server-side maelstrom grenade target selection
-            val radius = proxy.profile.LashRadius * proxy.profile.LashRadius
-            val targets = Zone.findAllTargets(continent, hitPos, proxy.profile.LashRadius, { _.livePlayerList })
-              .filter { target =>
-                Vector3.DistanceSquared(target.Position, hitPos) <= radius
+            //for convenience purposes, all resulting chain lashing is handled here and resolves in one pass
+            proxy.Position = hitPos
+            proxy.WhichSide = Sidedness.StrictlyBetweenSides
+            val radiusSquared = proxy.profile.LashRadius * proxy.profile.LashRadius
+            var availableTargets = sessionLogic.localSector.livePlayerList ++ sessionLogic.localSector.botList
+            var unresolvedChainLashHits: Seq[VolumetricGeometry] = Seq(Point(hitPos))
+            var uniqueChainLashTargets: Seq[(PlanetSideGameObject with FactionAffinity with Vitality, Projectile)] = Seq()
+            while (unresolvedChainLashHits.nonEmpty) {
+              val newChainLashTargets = unresolvedChainLashHits.flatMap { availableCarrier =>
+                val proxyCopy = proxy.copy(shot_origin = availableCarrier.center.asVector3)
+                val (hits, misses) = availableTargets.partition { target => Zone.distanceCheck(availableCarrier, target, radiusSquared) }
+                availableTargets = misses
+                hits.map(t => (t, proxyCopy))
               }
-            //chainlash is separated from the actual damage application for convenience
-            continent.AvatarEvents ! AvatarServiceMessage(
-              continent.id,
-              AvatarAction.SendResponse(
-                PlanetSideGUID(0),
-                ChainLashMessage(
-                  hitPos,
-                  projectile.profile.ObjectId,
-                  targets.map { _.GUID }
-                )
-              )
-            )
-            targets.map { target =>
-              (target, proxy, hitPos, target.Position)
+              uniqueChainLashTargets = uniqueChainLashTargets ++ newChainLashTargets
+              unresolvedChainLashHits = newChainLashTargets.map { case (t, _) => t.Definition.Geometry(t) }
             }
+            val (guidRefs, outputRefs) = uniqueChainLashTargets.map { case (target, proxyCopy) =>
+              (target.GUID, (target, proxyCopy, proxyCopy.shot_origin, target.Position))
+            }.unzip
+            //chain lash effect
+            continent.AvatarEvents ! MessageEnvelope(
+              continent.id,
+              SendResponse(ChainLashMessage(hitPos, projectile.profile.ObjectId, guidRefs.toList))
+            )
+            //chain lash target output
+            outputRefs.toList
           } else {
             Nil
           }
@@ -784,28 +823,12 @@ class WeaponAndProjectileOperations(
     }
   }
 
-  private def performLittleBuddyExplosion(listOfProjectiles: List[Projectile]): Boolean = {
-    val listOfLittleBuddies: List[Projectile] = listOfProjectiles.filter { _.tool_def == GlobalDefinitions.oicw }
-    val size: Int = listOfLittleBuddies.size
-    if (size > 0) {
-      val desiredDownwardsProjectiles: Int = 2
-      val firstHalf: Int = math.min(size, desiredDownwardsProjectiles) //number that fly straight down
+  private def queueLittleBuddyExplosion(proxy: Projectile): Boolean = {
+    if (proxy.profile == GlobalDefinitions.oicw_little_buddy) {
       val speed: Float = 144f //speed (packet discovered)
       val dist: Float = 25 //distance (client defined)
-      //downwards projectiles
-      var i: Int = 0
-      listOfLittleBuddies.take(firstHalf).foreach { proxy =>
-        val dir = proxy.Velocity.map(_ / speed).getOrElse(Vector3.Zero)
-        queueLittleBuddyDamage(proxy, dir, dist)
-        i += 1
-      }
-      //flared out projectiles
-      i = 0
-      listOfLittleBuddies.drop(firstHalf).foreach { proxy =>
-        val dir = proxy.Velocity.map(_ / speed).getOrElse(Vector3.Zero)
-        queueLittleBuddyDamage(proxy, dir, dist)
-        i += 1
-      }
+      val dir = proxy.Velocity.map(_ / speed).getOrElse(Vector3.Zero)
+      queueLittleBuddyDamage(proxy, dir, dist)
       true
     } else {
       false
@@ -818,6 +841,26 @@ class WeaponAndProjectileOperations(
     obj.Position = obj.Position + orientation * distance
     val explosionFunc: ()=>Unit = WeaponAndProjectileOperations.detonateLittleBuddy(continent, obj, proxy, proxy.owner)
     context.system.scheduler.scheduleOnce(500.milliseconds) { explosionFunc() }
+  }
+
+  /**
+   * Find a projectile with the given globally unique identifier and mark it as a resolved shot.
+   * A `Resolved` shot has either encountered an obstacle or is being cleaned up for not finding an obstacle.
+   * Check if we are required to deal with damage proxy management as well.
+   * @param projectile projectile
+   * @param resolution resolution status to promote the projectile
+   * @return package that contains information about the damage
+   */
+  def resolveProjectileInteractionAndProxy(
+                                            target: PlanetSideGameObject with FactionAffinity with Vitality,
+                                            projectile: Projectile,
+                                            resolution: DamageResolution.Value,
+                                            hitPosition: Vector3
+                                          ): Option[DamageInteraction] = {
+    if (projectile.profile.DamageProxyOnDirectHit.exists(_.test(target))) {
+      handleProxyDamage(projectile, hitPosition)
+    }
+    resolveProjectileInteraction(target, projectile, resolution, hitPosition)
   }
 
   /**
@@ -900,12 +943,9 @@ class WeaponAndProjectileOperations(
     tool.Magazine = 0
     sendResponse(InventoryStateMessage(tool.AmmoSlot.Box.GUID, weapon_guid, 0))
     sendResponse(ChangeFireStateMessage_Stop(weapon_guid))
-    continent.AvatarEvents ! AvatarServiceMessage(
-      continent.id,
-      AvatarAction.ChangeFireState_Stop(player.GUID, weapon_guid)
-    )
+    continent.AvatarEvents ! MessageEnvelope(continent.id, player.GUID, ChangeFireState_Stop(weapon_guid))
     sendResponse(WeaponDryFireMessage(weapon_guid))
-    continent.AvatarEvents ! AvatarServiceMessage(continent.id, AvatarAction.WeaponDryFire(player.GUID, weapon_guid))
+    continent.AvatarEvents ! MessageEnvelope(continent.id, player.GUID, WeaponDryFire(weapon_guid))
   }
 
   /**
@@ -921,7 +961,7 @@ class WeaponAndProjectileOperations(
       .map { sessionLogic.validObject(_, decorator="FindDetectedProjectileTargets") }
       .flatMap {
         case Some(obj: Vehicle) if !obj.Cloaked =>
-          //TODO hint: vehicleService ! VehicleServiceMessage(s"${obj.Actor}", VehicleAction.ProjectileAutoLockAwareness(mode))
+          //TODO hint: vehicleService ! MessageEnvelope(s"${obj.Actor}", VehicleAction.ProjectileAutoLockAwareness(mode))
           obj.Seats.values.flatMap { seat => seat.occupants.map(_.Name) }
         case Some(obj: Mountable) =>
           obj.Seats.values.flatMap { seat => seat.occupants.map(_.Name) }
@@ -1046,9 +1086,10 @@ class WeaponAndProjectileOperations(
   }
 
   def fireStateStartPlayerMessages(itemGuid: PlanetSideGUID): Unit = {
-    continent.AvatarEvents ! AvatarServiceMessage(
+    continent.AvatarEvents ! MessageEnvelope(
       sessionLogic.zoning.zoneChannel,
-      AvatarAction.ChangeFireState_Start(player.GUID, itemGuid)
+      player.GUID,
+      ChangeFireState_Start(itemGuid)
     )
   }
 
@@ -1057,9 +1098,10 @@ class WeaponAndProjectileOperations(
       case turret: FacilityTurret if continent.map.cavern =>
         turret.Actor ! VanuSentry.ChangeFireStart
     }
-    continent.VehicleEvents ! VehicleServiceMessage(
+    continent.VehicleEvents ! MessageEnvelope(
       continent.id,
-      VehicleAction.ChangeFireState_Start(player.GUID, itemGuid)
+      player.GUID,
+      ChangeFireState_Start(itemGuid)
     )
   }
 
@@ -1085,9 +1127,10 @@ class WeaponAndProjectileOperations(
   }
 
   def fireStateStopPlayerMessages(itemGuid: PlanetSideGUID): Unit = {
-    continent.AvatarEvents ! AvatarServiceMessage(
+    continent.AvatarEvents ! MessageEnvelope(
       sessionLogic.zoning.zoneChannel,
-      AvatarAction.ChangeFireState_Stop(player.GUID, itemGuid)
+      player.GUID,
+      ChangeFireState_Stop(itemGuid)
     )
   }
 
@@ -1096,9 +1139,10 @@ class WeaponAndProjectileOperations(
       case turret: FacilityTurret if continent.map.cavern =>
         turret.Actor ! VanuSentry.ChangeFireStop
     }
-    continent.VehicleEvents ! VehicleServiceMessage(
+    continent.VehicleEvents ! MessageEnvelope(
       continent.id,
-      VehicleAction.ChangeFireState_Stop(player.GUID, itemGuid)
+      player.GUID,
+      ChangeFireState_Stop(itemGuid)
     )
   }
 
@@ -1155,16 +1199,14 @@ class WeaponAndProjectileOperations(
   used by ReloadMessage handling
   */
   def reloadPlayerMessages(itemGuid: PlanetSideGUID): Unit = {
-    continent.AvatarEvents ! AvatarServiceMessage(
-      sessionLogic.zoning.zoneChannel,
-      AvatarAction.Reload(player.GUID, itemGuid)
-    )
+    continent.AvatarEvents ! MessageEnvelope(sessionLogic.zoning.zoneChannel, player.GUID, ReloadTool(itemGuid))
   }
 
   def reloadVehicleMessages(itemGuid: PlanetSideGUID): Unit = {
-    continent.VehicleEvents ! VehicleServiceMessage(
+    continent.VehicleEvents ! MessageEnvelope(
       continent.id,
-      VehicleAction.Reload(player.GUID, itemGuid)
+      player.GUID,
+      ReloadTool(itemGuid)
     )
   }
 
@@ -1338,10 +1380,10 @@ class WeaponAndProjectileOperations(
             val previous_box_guid = previousBox.GUID
             val boxDef            = box.Definition
             sendResponse(ChangeAmmoMessage(tool_guid, box.Capacity))
-            continent.AvatarEvents ! AvatarServiceMessage(
+            continent.AvatarEvents ! MessageEnvelope(
               sessionLogic.zoning.zoneChannel,
-              AvatarAction.ChangeAmmo(
-                player.GUID,
+              player.GUID,
+              ChangeAmmo(
                 tool_guid,
                 ammoSlotIndex,
                 previous_box_guid,
@@ -1439,29 +1481,32 @@ class WeaponAndProjectileOperations(
   def modifyAmmunitionInMountable(obj: PlanetSideServerObject with Container)(box: AmmoBox, reloadValue: Int): Unit = {
     modifyAmmunition(obj)(box, reloadValue)
     obj.Find(box).collect { index =>
-      continent.VehicleEvents ! VehicleServiceMessage(
+      continent.VehicleEvents ! MessageEnvelope(
         s"${obj.Actor}",
-        VehicleAction.InventoryState(
-          player.GUID,
-          box,
-          obj.GUID,
-          index,
-          box.Definition.Packet.DetailedConstructorData(box).get
-        )
+        player.GUID,
+        VehicleAction.InventoryState(box, obj.GUID, index, box.Definition.Packet.DetailedConstructorData(box).get)
       )
     }
   }
 
   def checkForHitPositionDiscrepancy(
-                                      projectile_guid: PlanetSideGUID,
-                                      hitPos: Vector3,
+                                      projectileGuid: PlanetSideGUID,
+                                      hitPosition: Vector3,
                                       target: PlanetSideGameObject with Vitality
                                     ): Unit = {
-    val hitPositionDiscrepancy = Vector3.DistanceSquared(hitPos, target.Position)
+    checkForHitPositionDiscrepancy(projectileGuid, hitPosition, target.Position)
+  }
+
+  def checkForHitPositionDiscrepancy(
+                                      projectileGuid: PlanetSideGUID,
+                                      hitPosition: Vector3,
+                                      targetPosition: Vector3
+                                    ): Unit = {
+    val hitPositionDiscrepancy = Vector3.DistanceSquared(hitPosition, targetPosition)
     if (hitPositionDiscrepancy > Config.app.antiCheat.hitPositionDiscrepancyThreshold) {
       // If the target position on the server does not match the position where the projectile landed within reason there may be foul play
       log.warn(
-        s"${player.Name}'s shot #${projectile_guid.guid} has hit discrepancy with target. Target: ${target.Position}, Reported: $hitPos, Distance: $hitPositionDiscrepancy / ${math.sqrt(hitPositionDiscrepancy).toFloat}; suspect"
+        s"${player.Name}'s shot #${projectileGuid.guid} has hit discrepancy with target. Target: $targetPosition, Reported: $hitPosition, Distance: $hitPositionDiscrepancy / ${math.sqrt(hitPositionDiscrepancy).toFloat}; suspect"
       )
     }
   }
@@ -1543,10 +1588,7 @@ class WeaponAndProjectileOperations(
     shootingStop.clear()
     (prefire ++ shooting).foreach { guid =>
       sendResponse(ChangeFireStateMessage_Stop(guid))
-      continent.AvatarEvents ! AvatarServiceMessage(
-        continent.id,
-        AvatarAction.ChangeFireState_Stop(player.GUID, guid)
-      )
+      continent.AvatarEvents ! MessageEnvelope(continent.id, player.GUID, ChangeFireState_Stop(guid))
     }
     prefire.clear()
     shooting.clear()
@@ -1567,9 +1609,10 @@ class WeaponAndProjectileOperations(
 
 object WeaponAndProjectileOperations {
   def updateProjectileSidednessAfterHit(zone: Zone, projectile: Projectile, hitPosition: Vector3): Unit = {
-    val origin = projectile.Position
+    val origin = projectile.shot_origin
     val distance = Vector3.Magnitude(hitPosition - origin)
-    zone.blockMap
+    zone
+      .blockMap
       .sector(hitPosition, distance)
       .environmentList
       .collect { case o: InteriorDoorPassage =>
@@ -1658,13 +1701,15 @@ object WeaponAndProjectileOperations {
    * @param source a game object that represents the source of the explosion
    * @param owner who or what to accredit damage from the explosion to;
    *              clarifies a normal `SourceEntry(source)` accreditation
+   * @return a list of affected entities
+
    */
   def detonateLittleBuddy(
                            zone: Zone,
                            source: PlanetSideGameObject with FactionAffinity with Vitality,
                            proxy: Projectile,
                            owner: SourceEntry
-                         )(): Unit = {
+                         )(): List[PlanetSideServerObject] = {
     Zone.serverSideDamage(zone, source, littleBuddyExplosionDamage(owner, proxy.id, source.Position))
   }
 

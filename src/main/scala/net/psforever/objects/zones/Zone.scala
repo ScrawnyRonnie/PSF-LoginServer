@@ -32,9 +32,9 @@ import scalax.collection.GraphEdge._
 import scala.util.Try
 import akka.actor.typed
 import net.psforever.actors.session.AvatarActor
-import net.psforever.actors.zone.ZoneActor
+import net.psforever.actors.zone.{BuildingActor, ShootingRangeTargetSpawnerActor, ZoneActor}
 import net.psforever.actors.zone.building.WarpGateLogic
-import net.psforever.objects.avatar.Avatar
+import net.psforever.objects.avatar.{Avatar, AvatarBot, PlayerControl}
 import net.psforever.objects.definition.ObjectDefinition
 import net.psforever.objects.geometry.d3.VolumetricGeometry
 import net.psforever.objects.guid.pool.NumberPool
@@ -56,6 +56,8 @@ import net.psforever.objects.vital.interaction.{DamageInteraction, DamageResult}
 import net.psforever.objects.vital.prop.DamageWithPosition
 import net.psforever.objects.vital.Vitality
 import net.psforever.objects.zones.blockmap.{BlockMap, SectorPopulation}
+import net.psforever.packet.game.EmpireBenefitsMessage.{ZoneBenefit, ZoneLock, ZoneLockBenefit, ZoneLockZone}
+import net.psforever.packet.game.{EmpireBenefitsMessage, PropertyOverrideMessage}
 import net.psforever.services.Service
 import net.psforever.zones.Zones
 
@@ -134,6 +136,10 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
 
   /**
     */
+  private val bots: ListBuffer[AvatarBot] = ListBuffer[AvatarBot]()
+
+  /**
+    */
   private val corpses: ListBuffer[Player] = ListBuffer[Player]()
 
   private var projectiles: ActorRef = Default.Actor
@@ -142,6 +148,11 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
   /**
     */
   private var population: ActorRef = Default.Actor
+
+  /** 
+   * Actor that handles non-player controlled entities, used for VR Shooting Range targets. 
+   */
+  private var npcPopulation: ActorRef = Default.Actor
 
   private var buildings: PairMap[Int, Building] = PairMap.empty[Int, Building]
 
@@ -193,6 +204,23 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
     * @see `init(ActorContext)`
     */
   private var zoneInitialized: Promise[Boolean] = Promise[Boolean]()
+
+  /**
+    * For ContinentalLockUpdateMessage
+    */
+  var lockedBy: PlanetSideEmpire.Value = PlanetSideEmpire.NEUTRAL
+
+  /**
+    * Used with lockedBy, but persists until another empire locks the cont
+    */
+  var benefitRecipient: PlanetSideEmpire.Value = PlanetSideEmpire.NEUTRAL
+
+  /**
+    * Holds the origin time of this zones
+    * @see `TimeOfDayMessage`
+    */
+  private var timeOfDayOrigin: Long = 0
+  private var timeOfDaySpeed: Float = 10.0f
 
   /**
     * When the zone has completed initializing, this will be the future.
@@ -425,6 +453,8 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
 
   def Players: List[Avatar] = AllPlayers.map(_.avatar)
 
+  def BotAvatars: List[AvatarBot] = bots.toList
+
   def LivePlayers: List[Player] = AllPlayers.filterNot(_.spectator)
 
   def Spectator: List[Player] = AllPlayers.filter(_.spectator)
@@ -450,6 +480,8 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
   def Transport: ActorRef = transport
 
   def Population: ActorRef = population
+
+  def NPCPopulation: ActorRef = npcPopulation
 
   def Buildings: Map[Int, Building] = buildings
 
@@ -553,6 +585,42 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
     HotSpotTimeFunction
   }
 
+  def GetTimeOfDay(): Float = {
+    val now = System.currentTimeMillis()
+    val timeDiff = now - timeOfDayOrigin
+
+    // get seconds
+    val diffSeconds = timeDiff / 1000
+
+    // apply speed factor
+    val elapsedTime = diffSeconds * timeOfDaySpeed
+
+    // wrap time to 24h
+    elapsedTime % 86400
+  }
+
+  def SetTimeOfDay(requestedTime: Float): Unit = {
+    val now = System.currentTimeMillis()
+
+    val requestedTimeDiff = requestedTime / timeOfDaySpeed
+
+    timeOfDayOrigin = now - (requestedTimeDiff * 1000.0).toLong
+  }
+
+  def GetTimeOfDaySpeed(): Float = {
+    timeOfDaySpeed
+  }
+
+  def SetTimeOfDaySpeed(requestedSpeed: Float): Unit = {
+    // store current time
+    val timeOfDay = GetTimeOfDay()
+
+    timeOfDaySpeed = requestedSpeed
+
+    // restore old time with new speed considered
+    SetTimeOfDay(timeOfDay)
+  }
+
   /**
     * Provide bulk correspondence on all map entities that can be composed into packet messages and reported to a client.
     * These messages are sent in this fashion at the time of joining the server:<br>
@@ -638,6 +706,142 @@ class Zone(val id: String, val map: ZoneMap, zoneNumber: Int) {
       liveFireAllowed.update(f, state)
     }
     output.toList
+  }
+
+  def NotifyContinentalLockBenefits(zone: Zone, building: Building): Unit = {
+    building.Actor ! BuildingActor.ContinentalLock(zone)
+    ApplyHomeLockBenefits(building)
+  }
+
+  def ApplyHomeLockBenefits(building: Building): Unit = {
+    val homeSets: Map[PlanetSideEmpire.Value, Set[Int]] = Map(
+      PlanetSideEmpire.TR -> Set(1, 2),
+      PlanetSideEmpire.VS -> Set(5, 6),
+      PlanetSideEmpire.NC -> Set(7, 10)
+    )
+    val homePerks: Map[PlanetSideEmpire.Value, String] = Map(
+      PlanetSideEmpire.TR -> "battlewagon 15mmbullet prowler 105mmbullet threemanheavybuggy heavy_grenade_mortar apc_tr",
+      PlanetSideEmpire.VS -> "magrider pulse_battery heavy_rail_beam_battery twomanhoverbuggy flux_cannon_thresher_battery aurora fluxpod_ammo apc_vs",
+      PlanetSideEmpire.NC -> "thunderer gauss_cannon_ammo twomanheavybuggy firebird_missile vanguard 150mmbullet apc_nc"
+    )
+
+    def isLockedBy(homeSet: Set[Int], empire: PlanetSideEmpire.Value): Boolean =
+      Zones.zones.filter(z => homeSet.contains(z.Number)).forall(_.benefitRecipient == empire)
+
+    val perks: Map[PlanetSideEmpire.Value, String] =
+      PlanetSideEmpire.values.map { empire =>
+        val empirePerks = homeSets.collect {
+          case (owner, zoneSet) if owner != empire && isLockedBy(zoneSet, empire) =>
+            homePerks(owner)
+        }
+        empire -> empirePerks.mkString(" ")
+      }.toMap
+
+    if (perks.values.forall(_.isEmpty)) {/*do nothing*/}
+    else {
+      val overrideMsg = PropertyOverrideMessage(List(PropertyOverrideMessage.GamePropertyScope(0, List(PropertyOverrideMessage.GamePropertyTarget(343,
+        List(PropertyOverrideMessage.GameProperty("purchase_exempt_vs", perks(PlanetSideEmpire.VS)),
+          PropertyOverrideMessage.GameProperty("purchase_exempt_tr", perks(PlanetSideEmpire.TR)),
+          PropertyOverrideMessage.GameProperty("purchase_exempt_nc", perks(PlanetSideEmpire.NC))))))))
+      building.Actor ! BuildingActor.HomeLockBenefits(overrideMsg)
+    }
+    val benefitMsg = BuildEmpireBenefits()
+    if (benefitMsg.zoneLocks.nonEmpty) {
+      building.Actor ! BuildingActor.HomeLockBenefits(benefitMsg)
+    }
+  }
+
+  def ApplyHomeLockBenefitsOnLogin(player: Player): Unit = {
+    val homeSets: Map[PlanetSideEmpire.Value, Set[Int]] = Map(
+      PlanetSideEmpire.TR -> Set(1, 2),
+      PlanetSideEmpire.VS -> Set(5, 6),
+      PlanetSideEmpire.NC -> Set(7, 10)
+    )
+    val homePerks: Map[PlanetSideEmpire.Value, String] = Map(
+      PlanetSideEmpire.TR -> "battlewagon 15mmbullet prowler 105mmbullet threemanheavybuggy heavy_grenade_mortar apc_tr",
+      PlanetSideEmpire.VS -> "magrider pulse_battery heavy_rail_beam_battery twomanhoverbuggy flux_cannon_thresher_battery aurora fluxpod_ammo apc_vs",
+      PlanetSideEmpire.NC -> "thunderer gauss_cannon_ammo twomanheavybuggy firebird_missile vanguard 150mmbullet apc_nc"
+    )
+
+    def isLockedBy(homeSet: Set[Int], empire: PlanetSideEmpire.Value): Boolean =
+      Zones.zones.filter(z => homeSet.contains(z.Number)).forall(_.benefitRecipient == empire)
+
+    val perks: Map[PlanetSideEmpire.Value, String] =
+      PlanetSideEmpire.values.map { empire =>
+        val empirePerks = homeSets.collect {
+          case (owner, zoneSet) if owner != empire && isLockedBy(zoneSet, empire) =>
+            homePerks(owner)
+        }
+        empire -> empirePerks.mkString(" ")
+      }.toMap
+
+    if (perks.values.forall(_.isEmpty)) {/*do nothing*/}
+    else {
+      val overrideMsg = PropertyOverrideMessage(List(PropertyOverrideMessage.GamePropertyScope(0, List(PropertyOverrideMessage.GamePropertyTarget(343,
+        List(PropertyOverrideMessage.GameProperty("purchase_exempt_vs", perks(PlanetSideEmpire.VS)),
+          PropertyOverrideMessage.GameProperty("purchase_exempt_tr", perks(PlanetSideEmpire.TR)),
+          PropertyOverrideMessage.GameProperty("purchase_exempt_nc", perks(PlanetSideEmpire.NC))))))))
+      PlayerControl.sendResponse(player.Zone, player.Name, overrideMsg)
+    }
+
+    val benefitMsg = BuildEmpireBenefits()
+    if (benefitMsg.zoneLocks.nonEmpty) {
+      PlayerControl.sendResponse(player.Zone, player.Name, benefitMsg)
+    }
+  }
+
+  def BuildEmpireBenefits(): EmpireBenefitsMessage = {
+    val locks = scala.collection.mutable.ArrayBuffer[ZoneLock]()
+    val benefits = scala.collection.mutable.ArrayBuffer[ZoneBenefit]()
+    val homeSets: Map[PlanetSideEmpire.Value, Set[Int]] = Map(
+      PlanetSideEmpire.TR -> Set(1, 2),
+      PlanetSideEmpire.VS -> Set(5, 6),
+      PlanetSideEmpire.NC -> Set(7, 10)
+    )
+    val benefitOfZones: Map[Int, Int] = Map(
+      3 -> 6,  // Cyssor gives benefit 6 (+10% armor bonus to vehicles)
+      4 -> 1,  // Ishundar gives benefit 1 (vehicle shields)
+      9 -> 3   // Searhus gives benefit 3 (faster respawn)
+    )
+    val homePerkBenefits: Map[PlanetSideEmpire.Value, Int] = Map(
+      PlanetSideEmpire.TR -> 7,
+      PlanetSideEmpire.NC -> 8,
+      PlanetSideEmpire.VS -> 9
+    )
+    def isLockedBy(homeSet: Set[Int], empire: PlanetSideEmpire.Value): Boolean =
+      Zones.zones.filter(z => homeSet.contains(z.Number)).forall(_.benefitRecipient == empire)
+
+    // home zone perks
+    homeSets.foreach { case (owner, set) =>
+      PlanetSideEmpire.values.filterNot(_ == PlanetSideEmpire.NEUTRAL).foreach { empire =>
+        if (owner != empire && isLockedBy(set, empire)) {
+          locks += ZoneLock(empire, s"lock-${owner.toString.toLowerCase}-homes")
+          benefits += ZoneBenefit(empire, ZoneLockBenefit(homePerkBenefits(owner)))
+        }
+      }
+    }
+
+    benefitOfZones.foreach { case (zoneNum, benefitId) =>
+      Zones.zones.find(_.Number == zoneNum).foreach { z =>
+        z.benefitRecipient match {
+          case PlanetSideEmpire.NEUTRAL =>
+          //nothing
+          case empire =>
+            locks += ZoneLock(empire, s"lock-z$zoneNum")
+            benefits += ZoneBenefit(empire, ZoneLockBenefit(benefitId))
+        }
+      }
+    }
+    // all four islands together give benefit 4 (vehicle repair)
+    val islandZones: Set[Int] = Set(29, 30, 31, 32)
+    val islandBenefit: Int = 4
+    PlanetSideEmpire.values.filterNot(_ == PlanetSideEmpire.NEUTRAL).foreach { empire =>
+      if (isLockedBy(islandZones, empire)) {
+        locks += ZoneLock(empire, ZoneLockZone.i1_i2_i3_i4)
+        benefits += ZoneBenefit(empire, ZoneLockBenefit(islandBenefit))
+      }
+    }
+    EmpireBenefitsMessage(locks.toVector, benefits.toVector)
   }
 }
 
@@ -1030,6 +1234,21 @@ object Zone {
     final case class PlayerCanNotSpawn(zone: Zone, player: Player)
   }
 
+  object Bots {
+
+    /**
+      * Message that reports to the zone of a freshly spawned bot.
+      * @param bot the `AvatarBot`
+      */
+    final case class Spawn(bot: AvatarBot)
+
+    /**
+      * Message that tells the zone to no longer mind the bot.
+      * @param bot the `AvatarBot`
+      */
+    final case class Release(bot: AvatarBot)
+  }
+
   object Corpse {
 
     /**
@@ -1352,6 +1571,17 @@ object Zone {
     }
   }
 
+  def AmsSpawnPoints(zone: Zone): List[SpawnTube] = {
+    import net.psforever.objects.vehicles.UtilityType
+    import net.psforever.objects.GlobalDefinitions
+    zone.Vehicles
+      .filter(veh =>
+        veh.Health > 0 && veh.Definition == GlobalDefinitions.ams && veh.DeploymentState == DriveState.Deployed
+      )
+      .flatMap(veh => veh.Utilities.values.filter(util => util.UtilType == UtilityType.ams_respawn_tube))
+      .map(util => util().asInstanceOf[SpawnTube])
+  }
+
   object Setup {
     /* zone setup code */
 
@@ -1383,16 +1613,22 @@ object Zone {
         zone.deployables = context.actorOf(Props(classOf[ZoneDeployableActor], zone, zone.constructions, zone.linkDynamicTurretWeapon), s"$id-deployables")
         zone.projectiles = context.actorOf(Props(classOf[ZoneProjectileActor], zone, zone.projectileList), s"$id-projectiles")
         zone.transport = context.actorOf(Props(classOf[ZoneVehicleActor], zone, zone.vehicles, zone.linkDynamicTurretWeapon), s"$id-vehicles")
-        zone.population = context.actorOf(Props(classOf[ZonePopulationActor], zone, zone.players, zone.corpses), s"$id-players")
+        zone.population = context.actorOf(Props(classOf[ZonePopulationActor], zone, zone.players, zone.bots, zone.corpses), s"$id-players")
         zone.projector = context.actorOf(
           Props(classOf[ZoneHotSpotDisplay], zone, zone.hotspots, 15 seconds, zone.hotspotHistory, 60 seconds),
           s"$id-hotspots"
         )
         zone.soi = context.actorOf(Props(classOf[SphereOfInfluenceActor], zone), s"$id-soi")
 
-        zone.avatarEvents = context.actorOf(Props(classOf[AvatarService], zone), s"$id-avatar-events")
-        zone.localEvents = context.actorOf(Props(classOf[LocalService], zone), s"$id-local-events")
-        zone.vehicleEvents = context.actorOf(Props(classOf[VehicleService], zone), s"$id-vehicle-events")
+        //enable target spawns for VR Shooting Range zones
+        if (zone.id.startsWith("tzsh")) {
+          zone.npcPopulation = context.actorOf(Props(classOf[ShootingRangeTargetSpawnerActor], zone), s"$id-npcs")
+        }
+        zone.avatarEvents = context.actorOf(AvatarService(), s"$id-avatar-events")
+        zone.localEvents = context.actorOf(LocalService(zone), s"$id-local-events")
+        zone.vehicleEvents = context.actorOf(VehicleService(), s"$id-vehicle-events")
+
+        zone.timeOfDayOrigin = System.currentTimeMillis()
 
         BuildLocalObjects(zone)(context, guid)
         BuildSupportObjects(zone)
@@ -1481,14 +1717,14 @@ object Zone {
         .flatMap(_.Amenities.filter(_.Definition == GlobalDefinitions.resource_silo))
         .collect {
           case silo: ResourceSilo =>
-            silo.Actor ! Service.Startup()
+            silo.Actor ! Service.Startup
         }
       //some painfields need to look for their closest door
       buildings.values
         .flatMap(_.Amenities.filter(_.Definition.isInstanceOf[PainboxDefinition]))
         .collect {
           case painbox: Painbox =>
-            painbox.Actor ! Service.Startup()
+            painbox.Actor ! Service.Startup
         }
       //the orbital_buildings in sanctuary zones have to establish their shuttle routes
       map.shuttleBays
@@ -1496,7 +1732,7 @@ object Zone {
           guid(_)
         }
         .collect { case Some(obj: OrbitalShuttlePad) =>
-          obj.Actor ! Service.Startup()
+          obj.Actor ! Service.Startup
         }
       //allocate soi information
       zone.soi ! SOI.Build()
@@ -1662,14 +1898,39 @@ object Zone {
   /* explosions */
 
   /**
+   * Allocates `Damageable` targets within the vicinity of server-prepared damage dealing
+   * and informs those entities that they have affected by the aforementioned damage.
+   * Usually, this is considered an "explosion;" but, the application can be utilized for a variety of unbound damage.
+   * @param zone the zone in which the damage should occur
+   * @param source the entity that embodies the damage (information)
+   * @param createInteraction how the interaction for this damage is to prepared
+   * @return a list of affected entities;
+   *         only mostly complete due to the exclusion of objects whose damage resolution is different than usual
+   */
+  def serverSideDamage(
+                        zone: Zone,
+                        source: PlanetSideGameObject with FactionAffinity with Vitality,
+                        createInteraction: (PlanetSideGameObject with FactionAffinity with Vitality, PlanetSideGameObject with FactionAffinity with Vitality) => DamageInteraction
+                      ): List[PlanetSideServerObject] = {
+    source.Definition.innateDamage match {
+      case Some(damage) =>
+        serverSideDamage(zone, source, damage, createInteraction, distanceCheck, findAllTargets)
+      case None =>
+        Nil
+    }
+  }
+
+  /**
     * Allocates `Damageable` targets within the vicinity of server-prepared damage dealing
     * and informs those entities that they have affected by the aforementioned damage.
     * Usually, this is considered an "explosion;" but, the application can be utilized for a variety of unbound damage.
     * @param zone the zone in which the damage should occur
     * @param source the entity that embodies the damage (information)
     * @param createInteraction how the interaction for this damage is to prepared
-    * @param testTargetsFromZone a custom test for determining whether the allocated targets are affected by the damage
-    * @param acquireTargetsFromZone the main target-collecting algorithm
+    * @param testTargetsFromZone a custom test for determining whether the allocated targets are affected by the damage;
+    *                            filters targets from the existing selection
+    * @param acquireTargetsFromZone the main target-collecting algorithm;
+    *                               collects targets from sector information
     * @return a list of affected entities;
     *         only mostly complete due to the exclusion of objects whose damage resolution is different than usual
     */
@@ -1677,8 +1938,8 @@ object Zone {
                         zone: Zone,
                         source: PlanetSideGameObject with FactionAffinity with Vitality,
                         createInteraction: (PlanetSideGameObject with FactionAffinity with Vitality, PlanetSideGameObject with FactionAffinity with Vitality) => DamageInteraction,
-                        testTargetsFromZone: (PlanetSideGameObject, PlanetSideGameObject, Float) => Boolean = distanceCheck,
-                        acquireTargetsFromZone: (Zone, PlanetSideGameObject with FactionAffinity with Vitality, DamageWithPosition) => List[PlanetSideServerObject with Vitality] = findAllTargets
+                        testTargetsFromZone: (PlanetSideGameObject, PlanetSideGameObject, Float) => Boolean,
+                        acquireTargetsFromZone: (Zone, PlanetSideGameObject with FactionAffinity with Vitality, DamageWithPosition) => List[PlanetSideServerObject with Vitality]
                     ): List[PlanetSideServerObject] = {
     source.Definition.innateDamage match {
       case Some(damage) =>
@@ -1703,8 +1964,10 @@ object Zone {
     * @param zone the zone in which the damage should occur
     * @param source the entity that embodies the damage (information)
     * @param createInteraction how the interaction for this damage is to prepared
-    * @param testTargetsFromZone a custom test for determining whether the allocated targets are affected by the damage
-    * @param acquireTargetsFromZone the main target-collecting algorithm
+    * @param testTargetsFromZone a custom test for determining whether the allocated targets are affected by the damage;
+    *                            filters targets from the existing selection
+    * @param acquireTargetsFromZone the main target-collecting algorithm;
+    *                               collects targets from sector information
     * @return a list of affected entities;
     *         only mostly complete due to the exclusion of objects whose damage resolution is different than usual
     */
@@ -1723,7 +1986,18 @@ object Zone {
     val allAffectedTargets = pssos.filter { target => testTargetsFromZone(source, target, radius) }
     //inform remaining targets that they have suffered damage
     allAffectedTargets
-      .foreach { target => target.Actor ! Vitality.Damage(createInteraction(source, target).calculate()) }
+      .foreach { target => 
+      if (target.IsInVRZone) {
+        //disable all server-side damage in VR zones, unless the target is a bot in the VR Shooting Range
+        target match {
+          case bot: AvatarBot =>
+            target.Actor ! Vitality.Damage(createInteraction(source, target).calculate())
+          case _ =>
+        }
+      } else {
+        target.Actor ! Vitality.Damage(createInteraction(source, target).calculate())
+      }
+    }
     allAffectedTargets
   }
 
@@ -1881,6 +2155,8 @@ object Zone {
     //collect all targets that can be damaged
     //players
     val playerTargets = sector.livePlayerList.filterNot { _.VehicleSeated.nonEmpty }
+    //bots
+    val botTargets = sector.botList
     //vehicles
     val vehicleTargets = sector.vehicleList.filterNot { v => v.Destroyed || v.MountedIn.nonEmpty }
     //deployables
@@ -1888,7 +2164,7 @@ object Zone {
     //amenities
     val soiTargets = sector.amenityList.collect { case amenity: Vitality if !amenity.Destroyed => amenity }
     //altogether ...
-    playerTargets ++ vehicleTargets ++ deployableTargets ++ soiTargets
+    playerTargets ++ botTargets ++ vehicleTargets ++ deployableTargets ++ soiTargets
   }
 
   /**
@@ -1914,6 +2190,8 @@ object Zone {
     //collect all targets that can be damaged
     //players
     val playerTargets = sector.livePlayerList.filter { player => player.VehicleSeated.isEmpty && player.WhichSide == Sidedness.OutsideOf }
+    //bots
+    val botTargets = sector.botList.filter { bot => bot.WhichSide == Sidedness.OutsideOf }
     //vehicles
     val vehicleTargets = sector.vehicleList.filterNot { _.Destroyed }
     //deployables
@@ -1922,7 +2200,7 @@ object Zone {
     val soiTargets = sector.amenityList.collect {
       case amenity: Vitality if !amenity.Destroyed && amenity.WhichSide == Sidedness.OutsideOf && amenity.CanDamage => amenity }
     //altogether ...
-    playerTargets ++ vehicleTargets ++ deployableTargets ++ soiTargets
+    playerTargets ++ botTargets ++ vehicleTargets ++ deployableTargets ++ soiTargets
   }
 
   /**

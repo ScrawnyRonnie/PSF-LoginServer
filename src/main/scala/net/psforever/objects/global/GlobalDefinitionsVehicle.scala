@@ -1634,6 +1634,7 @@ object GlobalDefinitionsVehicle {
     droppod.Packet = new DroppodConverter()
     droppod.DeconstructionTime = Some(5 seconds)
     droppod.DestroyedModel = None //the adb calls out a droppod; the cyclic nature of this confounds me
+    droppod.RadiationShielding = 1.0f
     droppod.DamageUsing = DamageCalculations.AgainstAircraft
     droppod.DrownAtMaxDepth = false
     droppod.mass = 2500f
@@ -1667,6 +1668,7 @@ object GlobalDefinitionsVehicle {
     orbital_shuttle.Packet = new OrbitalShuttleConverter
     orbital_shuttle.DeconstructionTime = None
     orbital_shuttle.DestroyedModel = None
+    orbital_shuttle.RadiationShielding = 1.0f
     orbital_shuttle.DamageUsing = DamageCalculations.AgainstNothing
     orbital_shuttle.DrownAtMaxDepth = false
     orbital_shuttle.mass = 25000f
@@ -1735,7 +1737,7 @@ object GlobalDefinitionsVehicle {
     aphelion_gunner.AutoPilotSpeeds = (5, 1)
     aphelion_gunner.Packet = battleFrameConverter
     aphelion_gunner.DestroyedModel = None
-    //aphelion_gunner.destructionDelay = Some(4000L)
+    aphelion_gunner.destructionDelay = Some(4000L)
     aphelion_gunner.JackingDuration = Array(0, 62, 60, 30)
     aphelion_gunner.RadiationShielding = 0.5f
     aphelion_gunner.DamageUsing = DamageCalculations.AgainstBfr
@@ -1787,7 +1789,7 @@ object GlobalDefinitionsVehicle {
     colossus_gunner.AutoPilotSpeeds = (5, 1)
     colossus_gunner.Packet = battleFrameConverter
     colossus_gunner.DestroyedModel = None
-    //colossus_gunner.destructionDelay = Some(4000L)
+    colossus_gunner.destructionDelay = Some(4000L)
     colossus_gunner.JackingDuration = Array(0, 62, 60, 30)
     colossus_gunner.RadiationShielding = 0.5f
     colossus_gunner.DamageUsing = DamageCalculations.AgainstBfr
@@ -1839,7 +1841,7 @@ object GlobalDefinitionsVehicle {
     peregrine_gunner.AutoPilotSpeeds = (5, 1)
     peregrine_gunner.Packet = battleFrameConverter
     peregrine_gunner.DestroyedModel = None
-    //peregrine_gunner.destructionDelay = Some(4000L)
+    peregrine_gunner.destructionDelay = Some(4000L)
     peregrine_gunner.JackingDuration = Array(0, 62, 60, 30)
     peregrine_gunner.RadiationShielding = 0.5f
     peregrine_gunner.DamageUsing = DamageCalculations.AgainstBfr

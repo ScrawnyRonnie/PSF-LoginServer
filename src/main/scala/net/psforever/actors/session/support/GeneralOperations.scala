@@ -2,6 +2,7 @@
 package net.psforever.actors.session.support
 
 import akka.actor.{ActorContext, ActorRef, Cancellable, typed}
+import net.psforever.objects.avatar.AvatarBot
 import net.psforever.objects.serverobject.containable.Containable
 import net.psforever.objects.serverobject.doors.Door
 import net.psforever.objects.serverobject.interior.Sidedness
@@ -16,8 +17,12 @@ import net.psforever.objects.sourcing.{DeployableSource, PlayerSource, VehicleSo
 import net.psforever.objects.vehicles.Utility.InternalTelepad
 import net.psforever.objects.zones.blockmap.BlockMapEntity
 import net.psforever.objects.zones.exp.ToDatabase
-import net.psforever.services.RemoverActor
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.avatar.support.GroundEnvelope
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.{ObjectDelete, PlanetsideAttribute, SendResponse}
+import net.psforever.services.base.support.RemoverActor
+import net.psforever.services.local.support.{CaptureEnvelope, FlagEnvelope, HackCaptureActor}
+import net.psforever.services.local.LocalAction
 
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -47,9 +52,9 @@ import net.psforever.packet.game.PlanetsideAttributeEnum.PlanetsideAttributeEnum
 import net.psforever.packet.game.objectcreate._
 import net.psforever.packet.game._
 import net.psforever.services.account.AccountPersistenceService
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
+import net.psforever.services.avatar.AvatarAction
 import net.psforever.services.local.support.CaptureFlagManager
-import net.psforever.services.vehicle.{VehicleAction, VehicleServiceMessage}
+import net.psforever.services.vehicle.VehicleAction
 import net.psforever.services.Service
 import net.psforever.types._
 import net.psforever.util.Config
@@ -181,7 +186,7 @@ class GeneralOperations(
                        ) extends CommonSessionInterfacingFunctionality {
   private[session] var progressBarValue: Option[Float] = None
   private[session] var accessedContainer: Option[PlanetSideGameObject with Container] = None
-  private[session] var recentTeleportAttempt: Long = 0
+  private[session] var recentTeleportAttemptTime: Long = 0
   private[session] var kitToBeUsed: Option[PlanetSideGUID] = None
   // If a special item (e.g. LLU) has been attached to the player the GUID should be stored here, or cleared when dropped, since the drop hotkey doesn't send the GUID of the object to be dropped.
   private[session] var specialItemSlotGuid: Option[PlanetSideGUID] = None
@@ -191,6 +196,32 @@ class GeneralOperations(
   private[session] var heightHistory: Float = 0f
   private[session] var progressBarUpdate: Cancellable = Default.Cancellable
   private var charSavedTimer: Cancellable = Default.Cancellable
+
+  def handleEmote(pkt: EmoteMsg): Unit = {
+    val guid = player.GUID
+    val zone = player.Zone
+    val events = zone.LocalEvents
+    //todo better way to collect csr players while utilizing the aforementioned benefit of localSector
+    val position = player.Position
+    val rangeSq = {
+      val range = math.sqrt(2 * math.pow(sessionLogic.localSector.rangeX.toDouble, 2))
+      range * range
+    }
+    val msg = SendResponse(pkt)
+    val (localRecipients, localRecipientMessages) = sessionLogic
+      .localSector
+      .livePlayerList
+      .filter(_.GUID != guid)
+      .map { p => (p.Name, MessageEnvelope(p.Name, msg)) }
+      .unzip
+    val otherRecipientMessages = zone
+      .AllPlayers
+      .filter { p =>
+        !p.allowInteraction && p.GUID != guid && !localRecipients.contains(p.Name) && Vector3.DistanceSquared(p.Position, position) < rangeSq
+      }
+      .map(p => MessageEnvelope(p.Name, msg))
+    events ! BundledEnvelope(localRecipientMessages ++ otherRecipientMessages)
+  }
 
   def handleDropItem(pkt: DropItemMessage): GeneralOperations.ItemDropState.Behavior = {
     val DropItemMessage(itemGuid) = pkt
@@ -375,7 +406,7 @@ class GeneralOperations(
         val detectedTargets = sessionLogic.shooting.FindDetectedProjectileTargets(targets)
         val mode = 7 + (if (weapon.Projectile == GlobalDefinitions.wasp_rocket_projectile) 1 else 0)
         detectedTargets.foreach { target =>
-          continent.AvatarEvents ! AvatarServiceMessage(target, AvatarAction.ProjectileAutoLockAwareness(mode))
+          continent.AvatarEvents ! MessageEnvelope(target, AvatarAction.ProjectileAutoLockAwareness(mode))
         }
       case _ => ()
     }
@@ -393,9 +424,17 @@ class GeneralOperations(
             0
           }
           Some(TargetInfo(player.GUID, health, armor))
+        case Some(bot: AvatarBot) =>
+          val health = bot.Health.toFloat / bot.MaxHealth
+          val armor = if (bot.MaxArmor > 0) {
+            bot.Armor.toFloat / bot.MaxArmor
+          } else {
+            0
+          }
+          Some(TargetInfo(bot.GUID, health, armor))
         case _ =>
           log.warn(
-            s"TargetingImplantRequest: the info that ${player.Name} requested for target ${x.target_guid} is not for a player"
+            s"TargetingImplantRequest: the info that ${player.Name} requested for target ${x.target_guid} is not for a player or bot"
           )
           None
       }
@@ -447,7 +486,7 @@ class GeneralOperations(
                 case attacker
                   if attacker.Faction != player.Faction &&
                     System.currentTimeMillis() - llu.LastCollectionTime >= Config.app.game.experience.cep.lluSlayerCreditDuration.toMillis =>
-                  continent.AvatarEvents ! AvatarServiceMessage(
+                  continent.AvatarEvents ! MessageEnvelope(
                     attacker.Name,
                     AvatarAction.AwardCep(attacker.CharId, Config.app.game.experience.cep.lluSlayerCredit)
                   )
@@ -461,12 +500,12 @@ class GeneralOperations(
               }
           }
           if (!CaptureFlagManager.ReasonToLoseFlagViolently(continent, Some(guid), player)) {
-            continent.LocalEvents ! CaptureFlagManager.DropFlag(llu)
+            continent.LocalEvents ! FlagEnvelope(CaptureFlagManager.DropFlag(llu))
           }
         case Some((llu, Some(carrier: Player)))
           if carrier.GUID == player.GUID &&
             !CaptureFlagManager.ReasonToLoseFlagViolently(continent, Some(guid), player) =>
-          continent.LocalEvents ! CaptureFlagManager.DropFlag(llu)
+          continent.LocalEvents ! FlagEnvelope(CaptureFlagManager.DropFlag(llu))
         case Some((_, Some(carrier: Player))) =>
           log.warn(s"${player.toString} tried to drop LLU, but it is currently held by ${carrier.toString}")
         case Some((_, None)) =>
@@ -705,7 +744,7 @@ class GeneralOperations(
    * @param channel the channel name
    */
   private def unaccessContainerChannel(events: ActorRef, channel: String): Unit = {
-    events ! Service.Leave(Some(channel))
+    events ! Service.Leave(channel)
   }
 
   /**
@@ -842,7 +881,7 @@ class GeneralOperations(
       case _ if continent.EquipmentOnGround.contains(obj) =>
         obj.Position = Vector3.Zero
         continent.Ground ! Zone.Ground.RemoveItem(objectGuid)
-        continent.AvatarEvents ! AvatarServiceMessage.Ground(RemoverActor.ClearSpecific(List(obj), continent))
+        continent.AvatarEvents ! GroundEnvelope(RemoverActor.ClearSpecific(List(obj), continent))
         true
       case _ =>
         Zone.EquipmentIs.Where(obj, objectGuid, continent) match {
@@ -867,9 +906,22 @@ class GeneralOperations(
    * @param unk2 na
    */
   def hackObject(targetGuid: PlanetSideGUID, unk1: Long, unk2: HackState7): Unit = {
-    sendResponse(HackMessage(HackState1.Unk0, targetGuid, player_guid=Service.defaultPlayerGUID, progress=100, unk1.toFloat, HackState.Hacked, unk2))
+    sendResponse(HackMessage(HackState1.Unk0, targetGuid, player_guid=Default.GUID0, progress=100, unk1.toFloat, HackState.Hacked, unk2))
   }
 
+  /**
+   * Send a PlanetsideAttributeMessage packet to the client
+   * @param targetGuid The target of the attribute
+   * @param attribute The attribute
+   * @param attributeValue The attribute value
+   */
+  def sendPlanetsideAttributeMessage(
+                                      targetGuid: PlanetSideGUID,
+                                      attribute: PlanetsideAttributeEnum,
+                                      attributeValue: Long
+                                    ): Unit = {
+    sendPlanetsideAttributeMessage(targetGuid, attribute.id, attributeValue)
+  }
   /**
    * Send a PlanetsideAttributeMessage packet to the client
    * @param targetGuid The target of the attribute
@@ -878,7 +930,7 @@ class GeneralOperations(
    */
   def sendPlanetsideAttributeMessage(
                                       targetGuid: PlanetSideGUID,
-                                      attributeNumber: PlanetsideAttributeEnum,
+                                      attributeNumber: Int,
                                       attributeValue: Long
                                     ): Unit = {
     sendResponse(PlanetsideAttributeMessage(targetGuid, attributeNumber, attributeValue))
@@ -977,18 +1029,18 @@ class GeneralOperations(
           sendResponse(ChatMsg(ChatMessageType.UNK_227, "@ArmorShieldOff"))
         }
         player.UsingSpecial = SpecialExoSuitDefinition.Mode.Normal
-        continent.AvatarEvents ! AvatarServiceMessage(
+        continent.AvatarEvents ! MessageEnvelope(
           continent.id,
-          AvatarAction.PlanetsideAttributeToAll(player.GUID, 8, 0)
+          PlanetsideAttribute(player.GUID, 8, 0)
         )
       }
     }
   }
 
   private def activateMaxSpecialStateMessage(): Unit = {
-    continent.AvatarEvents ! AvatarServiceMessage(
+    continent.AvatarEvents ! MessageEnvelope(
       continent.id,
-      AvatarAction.PlanetsideAttributeToAll(player.GUID, 8, 1)
+      PlanetsideAttribute(player.GUID, 8, 1)
     )
   }
 
@@ -1001,9 +1053,10 @@ class GeneralOperations(
       case (Some(obj), Some(seatNum)) =>
         tplayer.VehicleSeated = None
         obj.Seats(seatNum).unmount(tplayer)
-        continent.VehicleEvents ! VehicleServiceMessage(
+        continent.VehicleEvents ! MessageEnvelope(
           continent.id,
-          VehicleAction.KickPassenger(tplayer.GUID, seatNum, unk2=false, obj.GUID)
+          tplayer.GUID,
+          VehicleAction.KickPassenger(seatNum, unk2=false, obj.GUID)
         )
       case _ => ()
     }
@@ -1057,6 +1110,10 @@ class GeneralOperations(
 
   def charSaved(): Unit = {
     sendResponse(ChatMsg(ChatMessageType.UNK_227, wideContents=false, "", "@charsaved", None))
+  }
+
+  def trainingGriefWarning(): Unit = {
+    sendResponse(GenericActionMessage(GenericAction.TrainingGriefWarning))
   }
 
   def noVoicedChat(pkt: PlanetSideGamePacket): Unit = {
@@ -1193,6 +1250,27 @@ class GeneralOperations(
     }
   }
 
+  def handleUseBot(obj: AvatarBot, equipment: Option[Equipment], msg: UseItemMessage): Unit = {
+    sessionLogic.zoning.CancelZoningProcessWithDescriptiveReason("cancel_use")
+    if (msg.unk3) {
+      msg.object_id match {
+        case ObjectClass.avatar | ObjectClass.avatar_bot | ObjectClass.avatar_bot_agile | ObjectClass.avatar_bot_agile_no_weapon |
+        ObjectClass.avatar_bot_max | ObjectClass.avatar_bot_max_no_weapon | ObjectClass.avatar_bot_reinforced |
+        ObjectClass.avatar_bot_reinforced_no_weapon | ObjectClass.avatar_bot_standard | ObjectClass.avatar_bot_standard_no_weapon =>
+        equipment match {
+          case Some(tool: Tool) if tool.Definition == GlobalDefinitions.bank =>
+            obj.Actor ! CommonMessages.Use(player, equipment)
+
+          case Some(tool: Tool) if tool.Definition == GlobalDefinitions.medicalapplicator =>
+            obj.Actor ! CommonMessages.Use(player, equipment)
+          case _ => ()
+        }
+
+        case _ =>
+      }
+    }
+  }
+
   def handleUseLocker(locker: Locker, equipment: Option[Equipment], msg: UseItemMessage): Unit = {
     equipment match {
       case Some(item) =>
@@ -1215,7 +1293,7 @@ class GeneralOperations(
         continent.GUID(specialItemSlotGuid) match {
           case Some(llu: CaptureFlag) =>
             if (llu.Target.GUID == captureTerminal.Owner.GUID) {
-              continent.LocalEvents ! LocalServiceMessage(continent.id, LocalAction.LluCaptured(llu))
+              continent.LocalEvents ! CaptureEnvelope(HackCaptureActor.FlagCaptured(llu))
             } else {
               log.info(
                 s"LLU target is not this base. Target GUID: ${llu.Target.GUID} This base: ${captureTerminal.Owner.GUID}"
@@ -1258,7 +1336,12 @@ class GeneralOperations(
   def handleUseTerminal(terminal: Terminal, equipment: Option[Equipment], msg: UseItemMessage): Unit = {
     equipment match {
       case Some(item) =>
-        sendUseGeneralEntityMessage(terminal, item)
+        if (terminal.Definition == GlobalDefinitions.main_terminal) {
+          sendUseMainTerminalMessage(terminal, item, msg.unk2)
+        }
+        else {
+          sendUseGeneralEntityMessage(terminal, item)
+        }
       case None
         if terminal.Owner == Building.NoBuilding || terminal.Faction == player.Faction ||
           terminal.HackedBy.nonEmpty || terminal.Faction == PlanetSideEmpire.NEUTRAL =>
@@ -1385,26 +1468,36 @@ class GeneralOperations(
                               dest: PlanetSideGameObject with TelepadLike
                             ): Unit = {
     val time = System.currentTimeMillis()
-    if (
-      time - recentTeleportAttempt > 2000L && router.DeploymentState == DriveState.Deployed &&
-        internalTelepad.Active &&
-        remoteTelepad.Active
-    ) {
-      val pguid = player.GUID
-      val sguid = src.GUID
-      val dguid = dest.GUID
-      sendResponse(PlayerStateShiftMessage(ShiftState(0, dest.Position, player.Orientation.z)))
-      useRouterTelepadEffect(pguid, sguid, dguid)
-      continent.LocalEvents ! LocalServiceMessage(
-        continent.id,
-        LocalAction.RouterTelepadTransport(pguid, pguid, sguid, dguid)
-      )
-      player.Position = dest.Position
-      player.LogActivity(TelepadUseActivity(VehicleSource(router), DeployableSource(remoteTelepad), PlayerSource(player)))
-    } else {
-      log.warn(s"UseRouterTelepadSystem: ${player.Name} can not teleport")
+    if (time - recentTeleportAttemptTime > 2000L) {
+      if (router.DeploymentState == DriveState.Deployed && internalTelepad.Active && remoteTelepad.Active) {
+        val pguid = player.GUID
+        val sguid = src.GUID
+        val dguid = dest.GUID
+        val events = continent.AvatarEvents
+        val zoneid = continent.id
+        val destinationPosition = dest.Position
+        player.Position = destinationPosition
+        events ! BundledEnvelope(
+          MessageEnvelope(zoneid, pguid, ObjectDelete(pguid)),
+          MessageEnvelope(player.Name,
+            SendResponse(PlayerStateShiftMessage(ShiftState(0, destinationPosition, player.Orientation.z)))
+          ),
+          MessageEnvelope(zoneid, pguid, AvatarAction.LoadPlayer(
+            player.Definition.ObjectId,
+            pguid,
+            player.Definition.Packet.ConstructorData(player).get,
+            None
+          )),
+          MessageEnvelope(zoneid, pguid, LocalAction.RouterTelepadTransport(pguid, sguid, dguid))
+        )
+        useRouterTelepadEffect(pguid, sguid, dguid)
+        sessionLogic.zoning.spawn.ShiftPosition = destinationPosition
+        player.LogActivity(TelepadUseActivity(VehicleSource(router), DeployableSource(remoteTelepad), PlayerSource(player)))
+      } else {
+        log.warn(s"UseRouterTelepadSystem: ${player.Name} can not teleport")
+      }
     }
-    recentTeleportAttempt = time
+    recentTeleportAttemptTime = time
   }
 
   /**
@@ -1424,7 +1517,7 @@ class GeneralOperations(
                                     ): Unit = {
     val time = System.currentTimeMillis()
     if (
-      time - recentTeleportAttempt > 2000L && router.DeploymentState == DriveState.Deployed &&
+      time - recentTeleportAttemptTime > 2000L && router.DeploymentState == DriveState.Deployed &&
         internalTelepad.Active &&
         remoteTelepad.Active
     ) {
@@ -1437,16 +1530,19 @@ class GeneralOperations(
     } else {
       log.warn(s"UseRouterTelepadSystem: ${player.Name} can not teleport")
     }
-    recentTeleportAttempt = time
+    recentTeleportAttemptTime = time
   }
 
   def handleUseCaptureFlag(obj: CaptureFlag): Unit = {
+    if (player.ZoningRequest != Zoning.Method.None) {
+      sessionLogic.zoning.CancelZoningProcessWithDescriptiveReason("cancel_use")
+    }
     // LLU can normally only be picked up the faction that owns it
     specialItemSlotGuid match {
-      case None if obj.Faction == player.Faction =>
+      case None if obj.Faction == player.Faction && player.ZoningRequest == Zoning.Method.None =>
         specialItemSlotGuid = Some(obj.GUID)
         player.Carrying = SpecialCarry.CaptureFlag
-        continent.LocalEvents ! CaptureFlagManager.PickupFlag(obj, player)
+        continent.LocalEvents ! FlagEnvelope(CaptureFlagManager.PickupFlag(obj, player))
       case None =>
         log.warn(s"${player.Faction} player ${player.toString} tried to pick up a ${obj.Faction} LLU -  ${obj.GUID}")
       case Some(guid) if guid != obj.GUID =>
@@ -1479,6 +1575,14 @@ class GeneralOperations(
   def sendUseGeneralEntityMessage(obj: PlanetSideServerObject, equipment: Equipment): Unit = {
     sessionLogic.zoning.CancelZoningProcessWithDescriptiveReason("cancel_use")
     obj.Actor ! CommonMessages.Use(player, Some(equipment))
+  }
+
+  def sendUseMainTerminalMessage(obj: PlanetSideServerObject, equipment: Equipment, virus: Long): Unit = {
+    sessionLogic.zoning.CancelZoningProcessWithDescriptiveReason("cancel_use")
+    if (player.Faction == obj.Faction)
+      obj.Actor ! CommonMessages.RemoveVirus(player, Some(equipment))
+    else
+      obj.Actor ! CommonMessages.UploadVirus(player, Some(equipment), virus)
   }
 
   def handleUseDefaultEntity(obj: PlanetSideGameObject, equipment: Option[Equipment]): Unit = {

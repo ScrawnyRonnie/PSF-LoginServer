@@ -6,7 +6,6 @@ import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.io.Udp
 import java.net.InetSocketAddress
 import java.security.{SecureRandom, Security}
-
 import javax.crypto.spec.SecretKeySpec
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 
@@ -26,6 +25,7 @@ import net.psforever.packet.game._
 import net.psforever.packet.crypto._
 import net.psforever.packet.game.{ChangeFireModeMessage, CharacterInfoMessage, KeepAliveMessage, PingMsg}
 import net.psforever.packet.PacketCoding.CryptoCoding
+import net.psforever.packet.reset.ResetSequence
 import net.psforever.util.{Config, DiffieHellman, Md5Mac}
 
 /**
@@ -145,6 +145,16 @@ object MiddlewareActor {
     packet.isInstanceOf[SquadDetailDefinitionUpdateMessage]
   }
 
+  /** `ChatMsg` [sometimes] causes the same issue as the squad packet above. Isolating for now */
+  private def chatMsgGuard(packet: PlanetSidePacket): Boolean = {
+    packet.isInstanceOf[ChatMsg]
+  }
+
+  /** `PropertyOverrideMessage` ptsd from other large packets causing issues when bundled */
+  private def propertyOverrideMessageGuard(packet: PlanetSidePacket): Boolean = {
+    packet.isInstanceOf[PropertyOverrideMessage]
+  }
+
   /**
     * A function for blanking tasks related to inbound packet resolution.
     * Do nothing.
@@ -209,17 +219,13 @@ class MiddlewareActor(
     * Increment the outbound sequence number.
     * The previous sequence number is returned.
     * The fidelity of the sequence field in packets is 16 bits, so wrap back to 0 after 65535.
-    * @return
+    * @return next sequence number
     */
   private def nextSequence: Int = {
-    if (outSequence >= 0xffff) {
-      // TODO resetting the sequence to 0 causes a client crash
-      // but that does not happen when we always send the same number
-      // the solution is most likely to send the proper ResetSequence payload
-      // send(ResetSequence(), None, crypto)
-      // outSequence = -1
-      // return nextSequence
-      outSequence
+    if (outSequence >= 0x8000) {
+      send(ResetSequence(), Some(outSequence), crypto)
+      performResetSequenceReset()
+      0
     } else {
       outSequence += 1
       outSequence
@@ -248,12 +254,24 @@ class MiddlewareActor(
   }
 
   /**
+   * When the sequence is reset,
+   * the server resets both the expectant packet sequence id and the delivered packet sequence id
+   * and gaslight the client to send packets using refreshed (delivered) id's.
+   */
+  private def performResetSequenceReset(): Unit = {
+    outSequence = 0
+    inSequence = 0
+  }
+
+  /**
     * Do not bundle these packets together with other packets
     */
   private val packetsBundledByThemselves: List[PlanetSidePacket => Boolean] = List(
     MiddlewareActor.keepAliveMessageGuard,
     MiddlewareActor.characterInfoMessageGuard,
-    MiddlewareActor.squadDetailDefinitionMessageGuard
+    MiddlewareActor.squadDetailDefinitionMessageGuard,
+    MiddlewareActor.chatMsgGuard,
+    MiddlewareActor.propertyOverrideMessageGuard
   )
 
   private val smpHistoryLength: Int = 100
@@ -285,6 +303,10 @@ class MiddlewareActor(
     math.abs(packetOutboundDelay * Config.app.network.middleware.packetBundlingDelayMultiplier).toLong,
     "milliseconds"
   )
+
+  /** How many bundles a single run of the bundling process may dispatch; at least one */
+  private val packetBundlingDrainLimit: Int =
+    math.max(1, Config.app.network.middleware.packetBundlingDrainLimit)
 
   /** Timer that handles the bundling and throttling of outgoing packets and resolves disorganized inbound packets */
   private var packetProcessor: Cancellable = Default.Cancellable
@@ -611,7 +633,7 @@ class MiddlewareActor(
         Behaviors.same
 
       case _: PlanetSideResetSequencePacket =>
-        log.error(s"Unexpected crypto packet: received a PlanetSideResetSequencePacket when it should never happen")
+        performResetSequenceReset()
         Behaviors.same
     }
   }
@@ -653,7 +675,16 @@ class MiddlewareActor(
     */
   private def processQueue(): Unit = {
     inReorderQueueFunc()
-    processOutQueueBundle()
+    /* Drain up to `packetBundlingDrainLimit` bundles per run. processOutQueueBundle dispatches
+       one bundle per call, so this budget governs how much of a backlog a single run clears,
+       while the bundling delay governs how aggressively packets are coalesced into each
+       bundle. The budget also bounds the loop, which therefore always terminates after a
+       fixed number of iterations even if a queue fails to shrink. */
+    var budget: Int = packetBundlingDrainLimit
+    while (budget > 0 && (outQueueBundled.nonEmpty || outQueue.nonEmpty)) {
+      processOutQueueBundle()
+      budget -= 1
+    }
   }
 
   /**

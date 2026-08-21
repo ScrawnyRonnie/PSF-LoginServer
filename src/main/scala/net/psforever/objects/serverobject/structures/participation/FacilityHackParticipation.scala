@@ -4,6 +4,9 @@ package net.psforever.objects.serverobject.structures.participation
 import net.psforever.objects.Player
 import net.psforever.objects.avatar.scoring.Kill
 import net.psforever.objects.sourcing.UniquePlayer
+import net.psforever.packet.game.GenericObjectActionMessage
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.SendResponse
 import net.psforever.types.{PlanetSideEmpire, Vector3}
 
 import scala.collection.mutable
@@ -45,6 +48,7 @@ trait FacilityHackParticipation extends ParticipationLogic {
         .filterNot { p =>
           playerContribution.exists { case (u, _) => p.CharId == u }
         }
+      informOfInstalledVirus(newParticipants)
       playerContribution =
         vanguardParticipants.map { case (u, (p, d, _)) => (u, (p, d + 1, curr)) } ++
           newParticipants.map { p => (p.CharId, (p, 1, curr)) } ++
@@ -94,6 +98,26 @@ trait FacilityHackParticipation extends ParticipationLogic {
           case -1 => list
           case cutOffIndex => list.drop(cutOffIndex)
         }) :+ newEntry
+    }
+  }
+
+  /**
+    * send packet that makes building lights green in case a virus was installed before this player got there
+    * @param list new players to the SOI
+    */
+  protected def informOfInstalledVirus(list : List[Player]): Unit = {
+    if (building.virusId != 8) {
+      import net.psforever.objects.serverobject.terminals.Terminal
+      import net.psforever.objects.GlobalDefinitions
+      val mainTerm = building.Amenities.filter(x => x.isInstanceOf[Terminal] && x.Definition == GlobalDefinitions.main_terminal).head.GUID
+      val pkts = SendResponse(
+        GenericObjectActionMessage(mainTerm, 61),
+        GenericObjectActionMessage(mainTerm, 58)
+      )
+      val events = building.Zone.AvatarEvents
+      events ! BundledEnvelope(list.map { p =>
+        MessageEnvelope(p.Name, pkts)
+      })
     }
   }
 }

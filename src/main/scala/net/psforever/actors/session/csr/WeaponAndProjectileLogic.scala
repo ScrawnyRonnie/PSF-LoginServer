@@ -127,12 +127,15 @@ class WeaponAndProjectileLogic(val ops: WeaponAndProjectileOperations, implicit 
     val list = ops.composeDirectDamageInformation(pkt)
     if (!player.spectator) {
       list.foreach {
-        case (target, projectile, _, _) =>
-          ops.resolveProjectileInteraction(target, projectile, DamageResolution.Hit, target.Position)
+        case (target, projectile, _, targetPos) =>
+          ops.resolveProjectileInteractionAndProxy(target, projectile, DamageResolution.Hit, targetPos)
       }
       //...
       if (list.isEmpty) {
-        ops.handleProxyDamage(pkt.projectile_guid, pkt.hit_info.map(_.hit_pos).getOrElse(Vector3.Zero))
+        ops.handleProxyDamage(pkt.projectile_guid, pkt.hit_info.map(_.hit_pos).getOrElse(Vector3.Zero)).foreach {
+          case (target, proxy, _, targetPos) =>
+            ops.resolveProjectileInteraction(target, proxy, DamageResolution.Hit, targetPos)
+        }
       }
     }
   }
@@ -154,12 +157,12 @@ class WeaponAndProjectileLogic(val ops: WeaponAndProjectileOperations, implicit 
         //...
         val (direct, others) = list.partition { case (_, _, hitPos, targetPos) => hitPos == targetPos }
         direct.foreach {
-          case (target, _, _, _) =>
-            ops.resolveProjectileInteraction(target, projectile, resolution1, target.Position)
+          case (target, _, _, targetPos) =>
+            ops.resolveProjectileInteractionAndProxy(target, projectile, resolution1, targetPos)
         }
         others.foreach {
-          case (target, _, _, _) =>
-            ops.resolveProjectileInteraction(target, projectile, resolution2, target.Position)
+          case (target, _, _, targetPos) =>
+            ops.resolveProjectileInteraction(target, projectile, resolution2, targetPos)
         }
         //...
         if (
@@ -180,9 +183,12 @@ class WeaponAndProjectileLogic(val ops: WeaponAndProjectileOperations, implicit 
         if (profile.ExistsOnRemoteClients && projectile.HasGUID) {
           continent.Projectile ! ZoneProjectile.Remove(projectileGuid)
         }
+      } else {
+        ops.handleProxyDamage(pkt.projectile_uid, pkt.projectile_pos).foreach {
+          case (target, proxy, _, targetPos) =>
+            ops.resolveProjectileInteraction(target, proxy, DamageResolution.Splash, targetPos)
+        }
       }
-      //...
-      ops.handleProxyDamage(pkt.projectile_uid, pkt.projectile_pos)
     }
   }
 

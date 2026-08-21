@@ -1,7 +1,7 @@
 // Copyright (c) 2017 PSForever
 package net.psforever.objects
 
-import net.psforever.objects.avatar.interaction.{TriggerOnPlayerRule, WithEntrance, WithGantry, WithLava, WithWater}
+import net.psforever.objects.avatar.interaction.{InteractWithForceDomeProtection, TriggerOnPlayerRule, WithEntrance, WithGantry, WithLava, WithWater}
 import net.psforever.objects.avatar.{Avatar, LoadoutManager, SpecialCarry}
 import net.psforever.objects.ballistics.InteractWithRadiationClouds
 import net.psforever.objects.ce.{Deployable, InteractWithMines, InteractWithTurrets}
@@ -20,7 +20,8 @@ import net.psforever.objects.vital.damage.DamageProfile
 import net.psforever.objects.vital.interaction.DamageInteraction
 import net.psforever.objects.vital.resolution.DamageResistanceModel
 import net.psforever.objects.zones.blockmap.BlockMapEntity
-import net.psforever.objects.zones.{InteractsWithZone, ZoneAware, Zoning}
+import net.psforever.objects.zones.interaction.InteractsWithZone
+import net.psforever.objects.zones.{ZoneAware, Zoning}
 import net.psforever.types._
 
 import scala.annotation.tailrec
@@ -39,6 +40,7 @@ class Player(var avatar: Avatar)
     with InteriorAwareFromInteraction
     with AuraContainer
     with MountableEntity {
+  interaction(new InteractWithForceDomeProtection())
   interaction(environment.interaction.InteractWithEnvironment(Seq(
     new WithEntrance(),
     new WithWater(avatar.name),
@@ -89,6 +91,8 @@ class Player(var avatar: Avatar)
   var outfit_id: Long                    = 0
   var outfit_window_open: Boolean        = false
   var outfit_list_open: Boolean          = false
+  var maxAutoRunEnabled: Boolean         = false
+  var protectedWhileZoning: Boolean      = false
 
   /** From PlanetsideAttributeMessage */
   var PlanetsideAttribute: Array[Long] = Array.ofDim(120)
@@ -628,6 +632,8 @@ object Player {
       Die(Some(reason))
     }
   }
+
+  case object Revive
 
   def apply(core: Avatar): Player = {
     new Player(core)

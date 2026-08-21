@@ -21,6 +21,8 @@ object GenericAction extends IntEnum[GenericAction] {
   final case object NewCharacterBasicTrainingPrompt  extends GenericAction(value = 14)
   final case object MaxAnchorsExtend_RCV             extends GenericAction(value = 15)
   final case object MaxAnchorsRelease_RCV            extends GenericAction(value = 16)
+  final case object MaxEnableAutoRun                 extends GenericAction(value = 17)
+  final case object MaxDisableAutoRun                extends GenericAction(value = 18)
   final case object MaxSpecialEffect_RCV             extends GenericAction(value = 20)
   final case object StopMaxSpecialEffect_RCV         extends GenericAction(value = 21)
   final case object CavernFacilityCapture            extends GenericAction(value = 22)
@@ -36,6 +38,7 @@ object GenericAction extends IntEnum[GenericAction] {
   final case object FailToDeconstruct                extends GenericAction(value = 33)
   final case object LookingForSquad_RCV              extends GenericAction(value = 36)
   final case object NotLookingForSquad_RCV           extends GenericAction(value = 37)
+  final case object TrainingGriefWarning             extends GenericAction(value = 43)
   final case object Unknown45                        extends GenericAction(value = 45)
 
   final case class Unknown(override val value: Int) extends GenericAction(value)

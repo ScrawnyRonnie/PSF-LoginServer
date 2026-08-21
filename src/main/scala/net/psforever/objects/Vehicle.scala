@@ -16,12 +16,12 @@ import net.psforever.objects.serverobject.hackable.Hackable
 import net.psforever.objects.serverobject.interior.{InteriorAwareFromInteraction, Sidedness}
 import net.psforever.objects.serverobject.structures.AmenityOwner
 import net.psforever.objects.vehicles._
-import net.psforever.objects.vehicles.interaction.{TriggerOnVehicleRule, WithLava, WithWater}
+import net.psforever.objects.vehicles.interaction.{InteractWithForceDomeProtectionSeatedInVehicle, InteractWithRadiationCloudsSeatedInVehicle, TriggerOnVehicleRule, WithLava, WithWater}
 import net.psforever.objects.vital.resistance.StandardResistanceProfile
 import net.psforever.objects.vital.Vitality
 import net.psforever.objects.vital.resolution.DamageResistanceModel
-import net.psforever.objects.zones.InteractsWithZone
 import net.psforever.objects.zones.blockmap.BlockMapEntity
+import net.psforever.objects.zones.interaction.InteractsWithZone
 import net.psforever.packet.PlanetSideGamePacket
 import net.psforever.types.{PlanetSideEmpire, PlanetSideGUID, Vector3}
 
@@ -94,6 +94,7 @@ class Vehicle(private val vehicleDef: VehicleDefinition)
       with AuraContainer
       with MountableEntity
       with InteriorAwareFromInteraction {
+  interaction(new InteractWithForceDomeProtectionSeatedInVehicle)
   interaction(environment.interaction.InteractWithEnvironment(Seq(
     new WithEntrance(),
     new WithWater(),
@@ -114,6 +115,7 @@ class Vehicle(private val vehicleDef: VehicleDefinition)
   private var cloaked: Boolean                    = false
   private var flying: Option[Int]                 = None
   private var capacitor: Int                      = 0
+  var protectedWhileZoning: Boolean               = false
 
   /**
     * Permissions control who gets to access different parts of the vehicle;

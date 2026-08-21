@@ -2,6 +2,7 @@
 package net.psforever.objects.equipment
 
 import net.psforever.objects._
+import net.psforever.objects.avatar.AvatarBot
 import net.psforever.objects.ce.{DeployableCategory, DeployedItem}
 import net.psforever.objects.serverobject.turret.{FacilityTurret, WeaponTurret}
 import net.psforever.objects.vital.{DamagingActivity, InGameHistory, Vitality}
@@ -17,7 +18,7 @@ object EffectTarget {
     * Arbitrary, but useful.
     */
   object Category extends Enumeration {
-    val Aircraft, Deployable, Equipment, Player, Turret, Vehicle = Value
+    val Aircraft, Deployable, Equipment, Player, Turret, Vehicle, All = Value
   }
 
   object Validation {
@@ -26,13 +27,26 @@ object EffectTarget {
     //noinspection ScalaUnusedSymbol
     def Invalid(target: PlanetSideGameObject): Boolean = false
 
-    def Medical(target: PlanetSideGameObject): Boolean =
+    //noinspection ScalaUnusedSymbol
+    def Valid(target: PlanetSideGameObject): Boolean = true
+
+    def Medical(target: PlanetSideGameObject): Boolean = {
       target match {
         case p: Player =>
           p.Health > 0 && (p.Health < p.MaxHealth || p.Armor < p.MaxArmor)
         case _ =>
           false
       }
+    }
+
+    def HealthModule(target: PlanetSideGameObject): Boolean = {
+      target match {
+        case p: Player =>
+          p.Health > 0 && p.Health < 120
+        case _ =>
+          false
+      }
+    }
 
     def HealthCrystal(target: PlanetSideGameObject): Boolean =
       target match {
@@ -98,6 +112,8 @@ object EffectTarget {
       target match {
         case p: Player =>
           p.isAlive
+        case b: AvatarBot =>
+          b.isAlive
         case _ =>
           false
       }
@@ -282,8 +298,8 @@ object EffectTarget {
     def FacilityTurretValidateMaxTarget(target: PlanetSideGameObject): Boolean =
       target match {
         case p: Player
-          if p.ExoSuit == ExoSuitType.MAX && p.VehicleSeated.isEmpty =>
-          val now = System.currentTimeMillis()
+          if p.ExoSuit == ExoSuitType.MAX && p.VehicleSeated.isEmpty && p.maxAutoRunEnabled =>
+          /* val now = System.currentTimeMillis()
           val pos = p.Position
           val faction = p.Faction
           val sector = p.Zone.blockMap.sector(p.Position, range = 51f)
@@ -293,7 +309,8 @@ object EffectTarget {
           if (radarCloakedAms(sector, pos) || radarCloakedAegis(sector, pos)) false
           else if (radarCloakedSensor(sector, pos, faction)) entityTookDamage(p, now) || usedEquipment
           else if (radarEnhancedInterlink(sector, pos, faction)) true
-          else p.isMoving(test = 15.5d)
+          else p.isMoving(test = 15.5d) */
+          true
         case _ =>
           false
       }

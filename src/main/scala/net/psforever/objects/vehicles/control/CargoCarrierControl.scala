@@ -3,7 +3,7 @@ package net.psforever.objects.vehicles.control
 
 import net.psforever.objects._
 import net.psforever.objects.serverobject.damage.{Damageable, DamageableVehicle}
-import net.psforever.objects.vehicles.{Cargo, CarrierBehavior}
+import net.psforever.objects.vehicles.Cargo
 import net.psforever.objects.vital.interaction.DamageResult
 
 /**
@@ -14,7 +14,16 @@ import net.psforever.objects.vital.interaction.DamageResult
 class CargoCarrierControl(vehicle: Vehicle)
   extends VehicleControl(vehicle)
     with CarrierBehavior {
-  def CarrierObject = vehicle
+  def CarrierObject: Vehicle = vehicle
+
+  override def TestToStartSelfReporting(): Boolean = {
+    super.TestToStartSelfReporting() &&
+      !CarrierObject
+        .CargoHolds
+        .values
+        .flatMap(_.occupants)
+        .exists(_.Seats.values.exists(_.isOccupied))
+  }
 
   override def postStop() : Unit = {
     super.postStop()

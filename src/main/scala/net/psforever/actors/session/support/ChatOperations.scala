@@ -11,16 +11,21 @@ import net.psforever.actors.session.spectator.SpectatorMode
 import net.psforever.actors.session.{AvatarActor, SessionActor}
 import net.psforever.actors.zone.ZoneActor
 import net.psforever.objects.LivePlayerList
+import net.psforever.objects.serverobject.interior.{InteriorAware, Sidedness}
+import net.psforever.objects.serverobject.mount.Mountable
 import net.psforever.objects.sourcing.PlayerSource
-import net.psforever.objects.zones.ZoneInfo
-import net.psforever.packet.game.SetChatFilterMessage
+import net.psforever.objects.zones.{Zone, ZoneInfo}
+import net.psforever.packet.game.TimeOfDayMessage.GetTimeOfDayValue
+import net.psforever.packet.game.{SetChatFilterMessage, TimeOfDayMessage}
+import net.psforever.services.base.envelope.MessageEnvelope
+import net.psforever.services.base.message.SendResponse
 import net.psforever.services.chat.{DefaultChannel, OutfitChannel, SquadChannel}
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.local.support.{CaptureEnvelope, HackCaptureActor}
 import net.psforever.services.teamwork.{SquadResponse, SquadService, SquadServiceResponse}
 import net.psforever.types.ChatMessageType.CMT_QUIT
 import org.log4s.Logger
 
-import java.util.concurrent.{Executors, TimeUnit}
+import java.util.concurrent.{Executors, ScheduledFuture, TimeUnit}
 import scala.annotation.unused
 import scala.collection.{Seq, mutable}
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -368,7 +373,10 @@ class ChatOperations(
       case (Some(buildings), Some(faction), Some(_)) =>
           //TODO implement timer
         //schedule processing of buildings with a delay
-        processBuildingsWithDelay(buildings, faction, 1000) //delay of 1000ms between each building operation
+        processBuildingsWithDelay(buildings, faction, 100) { zone =>
+          zone.actor ! ZoneActor.ZoneMapUpdate()
+          zone.actor ! ZoneActor.AssignLockedBy(zone, notifyPlayers=true)
+        }
         true
       case _ =>
         false
@@ -379,30 +387,33 @@ class ChatOperations(
                                  buildings: Seq[Building],
                                  faction: PlanetSideEmpire.Value,
                                  delayMillis: Long
-                               ): Unit = {
-    val buildingIterator = buildings.iterator
-    scheduler.scheduleAtFixedRate(
+                               )(onComplete: Zone => Unit): Unit = {
+    import net.psforever.objects.serverobject.structures.StructureType
+    val buildingsToProcess = buildings.filter(b => b.CaptureTerminal.isDefined && b.Faction != faction)
+    val iterator = buildingsToProcess.iterator
+    val zone = buildings.head.Zone
+    var handle: ScheduledFuture[_] = null
+    handle = scheduler.scheduleAtFixedRate(
       () => {
-        if (buildingIterator.hasNext) {
-          val building = buildingIterator.next()
+        if (iterator.hasNext) {
+          val building = iterator.next()
           val terminal = building.CaptureTerminal.get
-          val zone = building.Zone
-          val zoneActor = zone.actor
-          val buildingActor = building.Actor
-          //clear any previous hack
-          if (building.CaptureTerminalIsHacked) {
-            zone.LocalEvents ! LocalServiceMessage(
-              zone.id,
-              LocalAction.ResecureCaptureTerminal(terminal, PlayerSource.Nobody)
-            )
+          if (building.BuildingType == StructureType.Tower) {
+            building.Actor ! BuildingActor.SetFaction(faction)
+            building.Actor ! BuildingActor.AmenityStateChange(terminal, Some(false))
+            building.Actor ! BuildingActor.MapUpdate()
           }
-          //push any updates this might cause
-          zoneActor ! ZoneActor.ZoneMapUpdate()
-          //convert faction affiliation
-          buildingActor ! BuildingActor.SetFaction(faction)
-          buildingActor ! BuildingActor.AmenityStateChange(terminal, Some(false))
-          //push for map updates again
-          zoneActor ! ZoneActor.ZoneMapUpdate()
+          else {
+            if (building.CaptureTerminalIsHacked) {
+              zone.LocalEvents ! CaptureEnvelope(HackCaptureActor.ResecureCaptureTerminal(terminal, zone, PlayerSource.Nobody))
+            }
+            building.Actor ! BuildingActor.SetFaction(faction)
+            building.Actor ! BuildingActor.AmenityStateChange(terminal, Some(false))
+          }
+        }
+        else {
+          handle.cancel(false)
+          onComplete(zone)
         }
       },
       0,
@@ -505,6 +516,7 @@ class ChatOperations(
         )
       case (Some(zone), Some(gate), false) =>
         context.self ! SessionActor.SetZone(zone.zonename, gate)
+        customSetSidednessOfTarget(session.player, Sidedness.OutsideOf) //todo atm all locations are outside
       case (_, None, false) =>
         sendResponse(
           ChatMsg(UNK_229, wideContents=true, "", "Gate id not defined (use '/zone <zone> -list')", None)
@@ -532,6 +544,7 @@ class ChatOperations(
         coordinate.isDefined && coordinate.get >= 0 && coordinate.get <= 8191
       } =>
         context.self ! SessionActor.SetPosition(Vector3(x.toFloat, y.toFloat, z.toFloat))
+        sendResponse(ChatMsg(ChatMessageType.CMT_QUIT, s"Please ensure that the sidedness of target is correct for destination."))
       case (None, Some(waypoint)) if waypoint == "-list" =>
         val zone = PointOfInterest.get(session.player.Zone.id)
         zone match {
@@ -548,6 +561,7 @@ class ChatOperations(
         PointOfInterest.getWarpLocation(session.zone.id, waypoint) match {
           case Some(location) =>
             context.self ! SessionActor.SetPosition(location)
+            customSetSidednessOfTarget(session.player, Sidedness.OutsideOf) //todo atm all quick locations are outside
           case None =>
             sendResponse(
               ChatMsg(UNK_229, wideContents=true, "", s"unknown location '$waypoint'", None)
@@ -1410,8 +1424,70 @@ class ChatOperations(
     )
   }
 
+  def commandSetTime(session: Session, contents: String): Unit = {
+    val TimePattern = """([01]?\d|2[0-3]):([0-5]?\d)""".r
+
+    TimePattern.findFirstMatchIn(contents) match {
+      case Some(m) =>
+        val hh = m.group(1).toInt % 24
+        val mm = m.group(2).toInt % 60
+        val requestedTimeOfDay = GetTimeOfDayValue(hh, mm)
+        val zone = session.zone
+
+        // update zone
+        zone.SetTimeOfDay(requestedTimeOfDay)
+
+        // build update message
+        val msg = TimeOfDayMessage(zone.GetTimeOfDay(), zone.GetTimeOfDaySpeed())
+
+        // update players in zone
+        zone.AvatarEvents ! MessageEnvelope(zone.id, SendResponse(msg))
+
+        sendResponse(ChatMsg(messageType = UNK_227, contents = f"@CMT_SETTIME_OK^$hh~^$mm%02d~"))
+      case _ =>
+        sendResponse(ChatMsg(messageType = UNK_229, contents = "@CMT_SETTIME_usage"))
+    }
+  }
+
+  def customSetSidednessOfTarget(target: Player, side: Sidedness): Boolean = {
+    target.WhichSide = side
+    target.Zone.GUID(player.VehicleSeated) match {
+      case v: Mountable with InteriorAware =>
+        v.WhichSide = side
+      case _ => ()
+    }
+    true
+  }
+
+  def commandSetTimeSpeed(session: Session, contents: String): Unit = {
+    val FloatPattern = """-?\d+(\.\d{1,2})?""".r
+
+    FloatPattern.findAllMatchIn(contents).toList match {
+      case List(m) =>
+        var timeSpeed = m.matched.toFloat
+        if (timeSpeed < -1000.0f) timeSpeed = -1000.0f
+        if (timeSpeed > 1000.0f) timeSpeed = 1000.0f
+        val zone = session.zone
+
+        // update zone
+        zone.SetTimeOfDaySpeed(timeSpeed)
+
+        // build update message
+        val msg = TimeOfDayMessage(zone.GetTimeOfDay(), zone.GetTimeOfDaySpeed())
+
+        // update players in zone
+        zone.AvatarEvents ! MessageEnvelope(zone.id, SendResponse(msg))
+
+        sendResponse(ChatMsg(messageType = UNK_227, contents = s"@CMT_SETTIMESPEED_OK^$timeSpeed~"))
+      case _ =>
+        sendResponse(ChatMsg(messageType = UNK_229, contents = "@CMT_SETTIMESPEED_usage"))
+    }
+  }
+
   override protected[session] def stop(): Unit = {
     silenceTimer.cancel()
     chatService ! ChatService.LeaveAllChannels(chatServiceAdapter)
+    /* the scheduler pool is owned by this session, so it is released with the session */
+    scheduler.shutdown()
   }
 }

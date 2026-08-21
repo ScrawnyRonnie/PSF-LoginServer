@@ -4,7 +4,7 @@ package net.psforever.objects.serverobject.structures.participation
 import net.psforever.objects.serverobject.structures.{Building, StructureType}
 import net.psforever.objects.sourcing.{PlayerSource, UniquePlayer}
 import net.psforever.objects.zones.{HotSpotInfo, ZoneHotSpotProjector}
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
+import net.psforever.services.avatar.AvatarAction
 import net.psforever.types.{ChatMessageType, PlanetSideEmpire, Vector3}
 import net.psforever.util.Config
 import akka.pattern.ask
@@ -15,7 +15,8 @@ import net.psforever.objects.avatar.scoring.Kill
 import net.psforever.objects.serverobject.hackable.Hackable
 import net.psforever.objects.zones.exp.ToDatabase
 import net.psforever.packet.game.ChatMsg
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.SendResponse
 
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -24,6 +25,7 @@ import scala.concurrent.Future
 
 final case class MajorFacilityHackParticipation(building: Building) extends FacilityHackParticipation {
   private implicit val timeout: Timeout = 10.seconds
+  private val log = org.log4s.getLogger
 
   private var hotSpotLayersOverTime: Seq[List[HotSpotInfo]] = Seq[List[HotSpotInfo]]()
 
@@ -143,9 +145,7 @@ final case class MajorFacilityHackParticipation(building: Building) extends Faci
       if (contributionVictorSize > 0) {
         //setup for ...
         val populationIndices = playerPopulationOverTime.indices
-        val allFactions = PlanetSideEmpire.values.filterNot {
-          _ == PlanetSideEmpire.NEUTRAL
-        }.toSeq
+        val allFactions = PlanetSideEmpire.values.toSeq
         val (victorPopulationByLayer, opposingPopulationByLayer) = {
           val individualPopulationByLayer = allFactions.map { f =>
             (f, populationIndices.indices.map { i => playerPopulationOverTime(i)(f) })
@@ -176,6 +176,8 @@ final case class MajorFacilityHackParticipation(building: Building) extends Faci
         val playersInSoi = building.PlayersInSOI.filter {
           _.Faction == victorFaction
         }
+        log.info(s"Facility Capture Event - Was Resecure: $isResecured, Victor: $victorFaction, Opposing: $failSafeOpposingFaction, " +
+          s"Victor Size: $contributionVictorSize, Opposing Size: $contributionOpposingSize, Experience: $baseExperienceFromFacilityCapture")
         if (baseExperienceFromFacilityCapture > 0) {
           //2) population modifier
           //The value of the first should grow as population grows.
@@ -302,17 +304,18 @@ final case class MajorFacilityHackParticipation(building: Building) extends Faci
               finalCep,
               expType = "cep"
             )
-            events ! AvatarServiceMessage(hacker.Name, AvatarAction.AwardCep(hackerId, finalCep))
+            events ! MessageEnvelope(hacker.Name, AvatarAction.AwardCep(hackerId, finalCep))
           }*/
           //bystanders (cep if squad leader, bep otherwise)
-          contributingPlayers
+          events ! BundledEnvelope(contributingPlayers
             //.filterNot { _.CharId == hackerId }
-            .foreach { player =>
+            .map { player =>
               val charId = player.CharId
               val contributionMultiplier = contributionPerPlayerByTime.getOrElse(charId, 1f)
               val outputValue = (finalCep * contributionMultiplier).toLong
-              events ! AvatarServiceMessage(player.Name, AvatarAction.FacilityCaptureRewards(buildingId, zoneNumber, outputValue))
+              MessageEnvelope(player.Name, AvatarAction.FacilityCaptureRewards(buildingId, zoneNumber, outputValue))
             }
+          )
           //flag carrier (won't be in soi, but earns cep from capture)
           flagCarrier.collect {
             case player if !isResecured =>
@@ -336,7 +339,7 @@ final case class MajorFacilityHackParticipation(building: Building) extends Faci
                 finalModifiedCep,
                 expType = "llu"
               )
-              events ! AvatarServiceMessage(player.Name, AvatarAction.AwardCep(charId, finalModifiedCep))
+              events ! MessageEnvelope(player.Name, AvatarAction.AwardCep(charId, finalModifiedCep))
           }
         } else {
           //no need to calculate a fancy score
@@ -437,9 +440,9 @@ object MajorFacilityHackParticipation {
                                               msg: ChatMsg
                                             ): Unit = {
     val events = building.Zone.LocalEvents
-    val message = LocalAction.SendResponse(msg)
-    targets.foreach { player =>
-      events ! LocalServiceMessage(player.Name, message)
-    }
+    val message = SendResponse(msg)
+    events ! BundledEnvelope(targets.map { player =>
+      MessageEnvelope(player.Name, message)
+    })
   }
 }

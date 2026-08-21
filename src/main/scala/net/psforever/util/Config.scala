@@ -131,12 +131,14 @@ case class AntiCheatConfig(
 
 case class NetworkConfig(
     session: SessionConfig,
-    middleware: MiddlewareConfig
+    middleware: MiddlewareConfig,
+    eventCaching: CachedMessagesConfig
 )
 
 case class MiddlewareConfig(
     packetBundlingDelay: FiniteDuration,
     packetBundlingDelayMultiplier: Float,
+    packetBundlingDrainLimit: Int,
     inReorderTimeout: FiniteDuration,
     inSubslotMissingDelay: FiniteDuration,
     inSubslotMissingAttempts: Int
@@ -145,6 +147,12 @@ case class MiddlewareConfig(
 case class SessionConfig(
     inboundGraceTime: FiniteDuration,
     outboundGraceTime: FiniteDuration
+)
+
+case class CachedMessagesConfig(
+    flushCacheDelay: Long, //milliseconds
+    flushCacheMaxDelay: Long, //milliseconds
+    messageTrafficThreshold: Long
 )
 
 case class GameConfig(
@@ -158,6 +166,7 @@ case class GameConfig(
     baseCertifications: Seq[Certification],
     warpGates: WarpGateConfig,
     cavernRotation: CavernRotationConfig,
+    virtualTraining: VirtualTrainingConfig,
     savedMsg: SavedMessageEvents,
     playerDraw: PlayerStateDrawSettings,
     doorsCanBeOpenedByMedAppFromThisDistance: Float,
@@ -216,6 +225,13 @@ case class CavernRotationConfig(
     simultaneousUnlockedZones: Int,
     enhancedRotationOrder: Seq[Int],
     forceRotationImmediately: Boolean
+)
+
+case class VirtualTrainingConfig(
+    shootingRangeTargetsEnabled: Boolean,
+    maleBotNames: List[String],
+    femaleBotNames: List[String],
+    universalBotNames: List[String]
 )
 
 case class SavedMessageEvents(

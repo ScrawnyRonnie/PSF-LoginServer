@@ -2,8 +2,13 @@
 package net.psforever.objects.serverobject.terminals
 
 import akka.actor.{ActorRef, Cancellable}
+import net.psforever.objects.serverobject.damage.Damageable
 import net.psforever.objects.sourcing.AmenitySource
+import net.psforever.objects.vital.interaction.DamageResult
 import net.psforever.packet.game.HackState1
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.{PlanetsideAttribute, SendResponse}
+import net.psforever.services.local.support.{HackClearActor, HackClearEnvelope}
 import org.log4s.Logger
 
 import scala.annotation.unused
@@ -22,10 +27,7 @@ import net.psforever.objects.serverobject.structures.{Building, PoweredAmenityCo
 import net.psforever.objects.vital.{HealFromTerminal, RepairFromTerminal, Vitality}
 import net.psforever.objects.zones.ZoneAware
 import net.psforever.packet.game.InventoryStateMessage
-import net.psforever.services.Service
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
-import net.psforever.services.vehicle.{VehicleAction, VehicleServiceMessage}
+import net.psforever.services.local.LocalAction
 
 /**
  * An `Actor` that handles messages being dispatched to a specific `ProximityTerminal`.
@@ -136,6 +138,20 @@ class ProximityTerminalControl(term: Terminal with ProximityUnit)
       case _ => ;
     }
 
+  override protected def DamageAwareness(target: Target, cause: DamageResult, amount: Any) : Unit = {
+    tryAutoRepair()
+    super.DamageAwareness(target, cause, amount)
+  }
+
+  override protected def DestructionAwareness(target: Damageable.Target, cause: DamageResult) : Unit = {
+    tryAutoRepair()
+    if (term.HackedBy.nonEmpty) {
+      val zone = term.Zone
+      zone.LocalEvents ! HackClearEnvelope(HackClearActor.ObjectIsResecured(term))
+    }
+    super.DestructionAwareness(target, cause)
+  }
+
   override def PerformRepairs(target : Target, amount : Int) : Int = {
     val newHealth = super.PerformRepairs(target, amount)
     if(newHealth == target.Definition.MaxHealth) {
@@ -165,7 +181,8 @@ class ProximityTerminalControl(term: Terminal with ProximityUnit)
           self,
           ProximityTerminalControl.TerminalAction()
         )
-        TerminalObject.Zone.LocalEvents ! Terminal.StartProximityEffect(term)
+        val zone = TerminalObject.Zone
+        zone.LocalEvents ! MessageEnvelope(zone.id, LocalAction.ProximityTerminalEffect(TerminalObject.GUID, effectState = true))
       }
     } else {
       log.warn(s"ProximityTerminal.Use: $target was rejected by unit ${term.Definition.Name}@${term.GUID.guid}")
@@ -185,7 +202,8 @@ class ProximityTerminalControl(term: Terminal with ProximityUnit)
       //de-activation (global / local)
       if (term.NumberUsers == 0 && hadUsers) {
         terminalAction.cancel()
-        TerminalObject.Zone.LocalEvents ! Terminal.StopProximityEffect(term)
+        val zone = TerminalObject.Zone
+        zone.LocalEvents ! MessageEnvelope(zone.id, LocalAction.ProximityTerminalEffect(TerminalObject.GUID, effectState = false))
       }
     } else {
       log.debug(
@@ -200,12 +218,13 @@ class ProximityTerminalControl(term: Terminal with ProximityUnit)
     terminalAction.cancel()
     if (callbacks.nonEmpty) {
       callbacks.clear()
-      TerminalObject.Zone.LocalEvents ! Terminal.StopProximityEffect(term)
+      val zone = TerminalObject.Zone
+      zone.LocalEvents ! MessageEnvelope(zone.id, LocalAction.ProximityTerminalEffect(TerminalObject.GUID, effectState = true))
     }
     //clear hack state
     if (term.HackedBy.nonEmpty) {
       val zone = term.Zone
-      zone.LocalEvents ! LocalServiceMessage(zone.id, LocalAction.ClearTemporaryHack(Service.defaultPlayerGUID, term))
+      zone.LocalEvents ! HackClearEnvelope(HackClearActor.ObjectIsResecured(term))
     }
   }
 
@@ -231,6 +250,9 @@ object ProximityTerminalControl {
                                          target: PlanetSideGameObject
                                        ): Boolean = {
     (terminal.Definition, target) match {
+      case (_: MedicalTerminalDefinition, p: Player)
+        if terminal.Definition ==
+          GlobalDefinitions.medical_terminal_healing_module  => HealthModule(terminal, p)
       case (_: MedicalTerminalDefinition, p: Player)         => HealthAndArmorTerminal(terminal, p)
       case (_: WeaponRechargeTerminalDefinition, p: Player)  => WeaponRechargeTerminal(terminal, p)
       case (_: MedicalTerminalDefinition, v: Vehicle)        => VehicleRepairTerminal(terminal, v)
@@ -251,6 +273,16 @@ object ProximityTerminalControl {
     val fullHeal = HealAction(unit, target, medDef.HealAmount, PlayerHealthCallback)
     val fullRepair = ArmorRepairAction(unit, target, medDef.ArmorAmount)
     fullHeal && fullRepair
+  }
+
+  /**
+    * Activated by a facility having a linked cavern lock or health module installed. Friendly players
+    * within the SOI receive constant healing as requested by the client
+    */
+  def HealthModule(unit: Terminal with ProximityUnit, target: Player): Boolean = {
+    val medDef = unit.Definition.asInstanceOf[MedicalTerminalDefinition]
+    val fullHeal = HealthModuleAction(unit, target, medDef.HealAmount, PlayerHealthCallback)
+    fullHeal
   }
 
   /**
@@ -302,19 +334,48 @@ object ProximityTerminalControl {
     }
   }
 
+  /**
+    * Heals players and increases their health/max health up to 120 if they enter the SOI this benefit is active in.
+    */
+  def HealthModuleAction(
+                          terminal: Terminal,
+                          target: PlanetSideGameObject with Vitality with ZoneAware,
+                          healAmount: Int,
+                          updateFunc: PlanetSideGameObject with Vitality with ZoneAware => Unit
+                        ): Boolean = {
+    val maxHealthCap = 120
+    val zone = target.Zone
+    val oldMax = target.MaxHealth
+    val newMax = math.min(oldMax + healAmount, maxHealthCap)
+
+    if (oldMax < maxHealthCap) {
+      target.MaxHealth = newMax
+      zone.AvatarEvents ! MessageEnvelope(
+        zone.id,
+        PlanetsideAttribute(target.GUID, 1, newMax)
+      )
+    }
+    if (target.Health < newMax) {
+      target.Health = math.min(target.Health + healAmount, newMax)
+      target.LogActivity(HealFromTerminal(AmenitySource(terminal), 1))
+      updateFunc(target)
+    }
+    target.Health == newMax
+  }
+
   def PlayerHealthCallback(target: PlanetSideGameObject with Vitality with ZoneAware): Unit = {
     val zone = target.Zone
-    zone.AvatarEvents ! AvatarServiceMessage(
+    zone.AvatarEvents ! MessageEnvelope(
       zone.id,
-      AvatarAction.PlanetsideAttributeToAll(target.GUID, 0, target.Health)
+      PlanetsideAttribute(target.GUID, 0, target.Health)
     )
   }
 
   def VehicleHealthCallback(target: PlanetSideGameObject with Vitality with ZoneAware): Unit = {
     val zone = target.Zone
-    zone.VehicleEvents ! VehicleServiceMessage(
+    zone.VehicleEvents ! MessageEnvelope(
       zone.id,
-      VehicleAction.PlanetsideAttribute(Service.defaultPlayerGUID, target.GUID, 0, target.Health)
+      PlanetsideAttribute(target.GUID, 0, target.Health)
     )
   }
 
@@ -343,9 +404,9 @@ object ProximityTerminalControl {
       target.Armor = armor + finalRepairAmount
       target.LogActivity(RepairFromTerminal(AmenitySource(terminal), finalRepairAmount))
       val zone = target.Zone
-      zone.AvatarEvents ! AvatarServiceMessage(
+      zone.AvatarEvents ! MessageEnvelope(
         zone.id,
-        AvatarAction.PlanetsideAttributeToAll(target.GUID, 4, target.Armor)
+        PlanetsideAttribute(target.GUID, 4, target.Armor)
       )
       target.Armor == maxArmor
     } else {
@@ -355,7 +416,7 @@ object ProximityTerminalControl {
 
   /**
    * When standing in a friendly SOI whose facility is under the influence of an Ancient Weapon Module benefit,
-   * and the player is in possession of Ancient weaponnry whose magazine is not full,
+   * and the player is in possession of Ancient weaponry whose magazine is not full,
    * restore some ammunition to its magazine.
    * If no valid weapons are discovered or the discovered valid weapons have full magazines, stop using the terminal.
    * @param unit the terminal
@@ -371,12 +432,12 @@ object ProximityTerminalControl {
     val events = unit.Zone.AvatarEvents
     val channel = target.Name
     ancient.foreach { case (weapon, slots) =>
-      slots.foreach { slot =>
-        events ! AvatarServiceMessage(
+      events ! BundledEnvelope(slots.map { slot =>
+        MessageEnvelope(
           channel,
-          AvatarAction.SendResponse(Service.defaultPlayerGUID, InventoryStateMessage(slot.Box.GUID, weapon.GUID, slot.Box.Capacity))
+          SendResponse(InventoryStateMessage(slot.Box.GUID, weapon.GUID, slot.Box.Capacity))
         )
-      }
+      })
     }
     !result.flatMap { _._2 }.exists { slot => slot.Magazine < slot.MaxMagazine() }
   }
@@ -396,14 +457,14 @@ object ProximityTerminalControl {
     )
     val events = unit.Zone.VehicleEvents
     val channel = target.Actor.toString
-    result.foreach { case (weapon, slots) =>
-      slots.foreach { slot =>
-        events ! VehicleServiceMessage(
+    events ! BundledEnvelope(result.flatMap { case (weapon, slots) =>
+      slots.map { slot =>
+        MessageEnvelope(
           channel,
-          VehicleAction.SendResponse(Service.defaultPlayerGUID, InventoryStateMessage(slot.Box.GUID, weapon.GUID, slot.Box.Capacity))
+          SendResponse(InventoryStateMessage(slot.Box.GUID, weapon.GUID, slot.Box.Capacity))
         )
       }
-    }
+    })
     !result.flatMap { _._2 }.exists { slot => slot.Magazine < slot.MaxMagazine() }
   }
 

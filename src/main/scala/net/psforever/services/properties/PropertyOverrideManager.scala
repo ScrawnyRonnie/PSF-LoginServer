@@ -5,6 +5,7 @@ import net.psforever.packet.game.{GamePropertyTarget, PropertyOverrideMessage}
 import net.psforever.packet.game.PropertyOverrideMessage.GamePropertyScope
 import net.psforever.packet.game.objectcreate.ObjectClass
 import net.psforever.zones.Zones
+
 import scala.collection.mutable.ListBuffer
 
 class PropertyOverrideManager extends Actor {
@@ -12,11 +13,10 @@ class PropertyOverrideManager extends Actor {
 
   private var overrides: Map[Int, Map[String, List[(String, String)]]]            = Map()
   private var gamePropertyScopes: List[PropertyOverrideMessage.GamePropertyScope] = List()
-  lazy private val zoneIds: Iterable[Int]                                         = Zones.zones.map(_.Number)
 
   override def preStart(): Unit = {
     LoadOverridesFromFile(zoneId = 0) // Global overrides
-    for (zoneId <- zoneIds) {
+    for (zoneId <- Zones.zones.map(_.Number)) {
       LoadOverridesFromFile(zoneId)
     }
     ProcessGamePropertyScopes()
@@ -26,18 +26,22 @@ class PropertyOverrideManager extends Actor {
     case PropertyOverrideManager.GetOverridesMessage =>
       sender() ! gamePropertyScopes
 
-    case _ => ;
+    case _ => ()
   }
 
   private def LoadOverridesFromFile(zoneId: Int): Unit = {
-    val zoneOverrides = LoadFile(s"overrides/game_objects$zoneId.adb.lst")
+    val zoneOverrides = if (zoneId > 13 && zoneId < 23) {
+      LoadFile(s"overrides/game_objectstz.adb.lst")
+    } else {
+      LoadFile(s"overrides/game_objects$zoneId.adb.lst")
+    }
     if (zoneOverrides == null) {
       log.debug(s"PropertyOverride: no overrides found for zone $zoneId using filename game_objects$zoneId.adb.lst")
-      return
+    } else {
+      val grouped = zoneOverrides.groupBy(_._1).view.mapValues(_.map(x => (x._2, x._3)).toList).toMap
+      log.debug(s"PropertyOverride: loaded property overrides for zone $zoneId: ${grouped.toString}")
+      overrides += (zoneId -> grouped)
     }
-    val grouped = zoneOverrides.groupBy(_._1).view.mapValues(_.map(x => (x._2, x._3)).toList).toMap
-    log.debug(s"PropertyOverride: loaded property overrides for zone $zoneId: ${grouped.toString}")
-    overrides += (zoneId -> grouped)
   }
 
   private def ProcessGamePropertyScopes(): Unit = {

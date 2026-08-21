@@ -11,10 +11,11 @@ import net.psforever.objects.serverobject.resourcesilo.ResourceSilo
 import net.psforever.objects.serverobject.tube.SpawnTube
 import net.psforever.objects.zones.Zone
 import net.psforever.objects.zones.blockmap.BlockMapEntity
-import net.psforever.packet.game.{BuildingInfoUpdateMessage, DensityLevelUpdateMessage}
+import net.psforever.packet.game.{Additional3, BuildingInfoUpdateMessage, DensityLevelUpdateMessage}
 import net.psforever.types._
 import scalax.collection.{Graph, GraphEdge}
 import akka.actor.typed.scaladsl.adapter._
+import net.psforever.objects.serverobject.dome.ForceDomePhysics
 import net.psforever.objects.serverobject.llu.{CaptureFlag, CaptureFlagSocket}
 import net.psforever.objects.serverobject.structures.participation.{MajorFacilityHackParticipation, NoParticipation, ParticipationLogic, TowerHackParticipation}
 import net.psforever.objects.serverobject.terminals.capture.CaptureTerminal
@@ -32,8 +33,10 @@ class Building(
 
   private var faction: PlanetSideEmpire.Value = PlanetSideEmpire.NEUTRAL
   private var playersInSOI: List[Player]      = List.empty
-  private var forceDomeActive: Boolean        = false
   private var participationFunc: ParticipationLogic = NoParticipation
+  var virusId: Long                           = 8 // 8 default = no virus
+  var virusInstalledBy: Option[Int]           = None // faction id
+  var hasCavernLockBenefit: Boolean           = false
   super.Zone_=(zone)
   super.GUID_=(PlanetSideGUID(building_guid)) //set
   Invalidate()                                //unset; guid can be used during setup, but does not stop being registered properly later
@@ -55,11 +58,6 @@ class Building(
       case Some(buildings: Set[Building]) => buildings.exists(x => Building.Capitols.contains(x.name))
       case None                           => false
     }
-  }
-  def ForceDomeActive: Boolean = forceDomeActive
-  def ForceDomeActive_=(activated: Boolean): Boolean = {
-    forceDomeActive = activated
-    forceDomeActive
   }
 
   def Faction: PlanetSideEmpire.Value = faction
@@ -102,6 +100,13 @@ class Building(
     AllNeighbours collect {
       case wg: WarpGate if wg.Active => wg
       case b                         => b
+    }
+  }
+
+  def ForceDome: Option[ForceDomePhysics] = {
+    Amenities.find(_.isInstanceOf[ForceDomePhysics]) match {
+      case Some(out: ForceDomePhysics) => Some(out)
+      case _                           => None
     }
   }
 
@@ -204,13 +209,23 @@ class Building(
     }
     val cavernBenefit: Set[CavernBenefit] = if (
       generatorState != PlanetSideGeneratorState.Destroyed &&
-        faction != PlanetSideEmpire.NEUTRAL &&
-        connectedCavern().nonEmpty
+        faction != PlanetSideEmpire.NEUTRAL && !CaptureTerminalIsHacked &&
+        connectedCavern().exists(_.Zone.lockedBy == faction)
     ) {
-      Set(CavernBenefit.VehicleModule, CavernBenefit.EquipmentModule)
+      hasCavernLockBenefit = true
+      Set(CavernBenefit.VehicleModule, CavernBenefit.EquipmentModule, CavernBenefit.ShieldModule,
+          CavernBenefit.SpeedModule, CavernBenefit.HealthModule, CavernBenefit.PainModule)
     } else {
+      hasCavernLockBenefit = false
       Set(CavernBenefit.None)
     }
+    val (installedVirus, installedByFac) = if (virusId == 8)  {
+      (8, None)
+    }
+    else {
+      (virusId.toInt, Some(Additional3(inform_defenders=true, virusInstalledBy.getOrElse(3))))
+    }
+    val forceDomeActive = ForceDome.exists(_.Energized)
 
     BuildingInfoUpdateMessage(
       Zone.Number,
@@ -230,8 +245,8 @@ class Building(
       unk4 = Nil,
       unk5 = 0,
       unk6 = false,
-      unk7 = 8,     // unk7 != 8 will cause malformed packet
-      unk7x = None,
+      installedVirus,
+      installedByFac,
       boostSpawnPain,
       boostGeneratorPain
     )

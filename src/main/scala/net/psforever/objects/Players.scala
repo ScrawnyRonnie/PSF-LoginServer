@@ -19,11 +19,13 @@ import net.psforever.objects.vital.{InGameActivity, InGameHistory, RevivingActiv
 import net.psforever.objects.zones.Zone
 import net.psforever.packet.game._
 import net.psforever.types.{ChatMessageType, ExoSuitType, PlanetSideGUID, Vector3}
-import net.psforever.services.Service
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage}
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.avatar.AvatarAction
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.{ObjectDelete, SendResponse}
+import net.psforever.services.local.LocalAction
 
 import scala.annotation.tailrec
+import scala.collection.mutable.ArrayBuffer
 
 object Players {
   private val log = org.log4s.getLogger("Players")
@@ -48,10 +50,7 @@ object Players {
     ) {
       val events = target.Zone.AvatarEvents
       val uname  = user.Name
-      events ! AvatarServiceMessage(
-        uname,
-        AvatarAction.SendResponse(Service.defaultPlayerGUID, RepairMessage(target.GUID, progress.toInt))
-      )
+      events ! MessageEnvelope(uname, SendResponse(RepairMessage(target.GUID, progress.toInt)))
       true
     } else {
       false
@@ -61,7 +60,7 @@ object Players {
   /**
     * na
     * @see `AvatarAction.Revive`
-    * @see `AvatarResponse.Revive`
+    * @see `AvatarAction.Revive`
     * @param target the player being revived
     * @param medic the name of the player doing the reviving
     * @param item the tool being used to revive the target player
@@ -70,18 +69,18 @@ object Players {
     val name = target.Name
     val medicName = medic.Name
     log.info(s"$medicName had revived $name")
+    //give credit even if the player does not revive
     target.LogActivity(RevivingActivity(PlayerSource(target), PlayerSource(medic), target.MaxHealth, item.Definition))
     val magazine = item.Discharge(Some(25))
-    target.Zone.AvatarEvents ! AvatarServiceMessage(
+    PlayerControl.sendResponse(
+      target.Zone,
       medicName,
-      AvatarAction.SendResponse(
-        Service.defaultPlayerGUID,
+      Default.GUID0,
+      SendResponse(
         InventoryStateMessage(item.AmmoSlot.Box.GUID, item.GUID, magazine)
       )
     )
-    target.Zone.AvatarEvents ! AvatarServiceMessage(name, AvatarAction.Revive(target.GUID))
-    val reviveMessage = s"@YouHaveBeenMessage^revived~^$medicName~"
-    PlayerControl.sendResponse(target.Zone, name, ChatMsg(ChatMessageType.UNK_227, reviveMessage))
+    PlayerControl.sendResponse(target.Zone, name, Default.GUID0, AvatarAction.Revive(target.GUID))
   }
 
   /**
@@ -162,6 +161,8 @@ object Players {
   def CertificationToUseExoSuit(player: Player, exosuit: ExoSuitType.Value, subtype: Int): Boolean = {
     ExoSuitDefinition.Select(exosuit, player.Faction).Permissions match {
       case Nil =>
+        true
+      case _ if player.IsInVRZone =>
         true
       case permissions if subtype != 0 =>
         val certs = player.avatar.certifications
@@ -314,7 +315,7 @@ object Players {
                              ): Boolean = {
     if (player.Zone == obj.Zone && addFunc(obj)) {
       obj.Actor ! Deployable.Ownership(player)
-      player.Zone.LocalEvents ! LocalServiceMessage(player.Name, LocalAction.DeployableUIFor(obj.Definition.Item))
+      player.Zone.LocalEvents ! MessageEnvelope(player.Name, LocalAction.DeployableUIFor(obj.Definition.Item))
       true
     } else {
       false
@@ -331,7 +332,7 @@ object Players {
     //sent to avatar event bus to preempt additional tool management
     buildCooldownReset(zone, channel, obj.GUID)
     //sent to local event bus to cooperate with deployable management
-    zone.LocalEvents ! LocalServiceMessage(
+    zone.LocalEvents ! MessageEnvelope(
       channel,
       LocalAction.DeployableUIFor(obj.Definition.Item)
     )
@@ -345,10 +346,7 @@ object Players {
     */
   def buildCooldownReset(zone: Zone, channel: String, guid: PlanetSideGUID): Unit = {
     //sent to avatar event bus to preempt additional tool management
-    zone.AvatarEvents ! AvatarServiceMessage(
-      channel,
-      AvatarAction.SendResponse(Service.defaultPlayerGUID, GenericObjectActionMessage(guid, 21))
-    )
+    zone.AvatarEvents ! MessageEnvelope(channel, SendResponse(GenericObjectActionMessage(guid, 21)))
   }
 
   /**
@@ -404,10 +402,7 @@ object Players {
       }
     }) {
       val zone = player.Zone
-      zone.AvatarEvents ! AvatarServiceMessage(
-        zone.id,
-        AvatarAction.ObjectDelete(Service.defaultPlayerGUID, tool.GUID)
-      )
+      zone.AvatarEvents ! MessageEnvelope(zone.id, ObjectDelete(tool.GUID))
       true
     } else {
       false
@@ -442,27 +437,20 @@ object Players {
           if ((player.Slot(index).Equipment = obj).contains(obj)) {
             val fireMode = tool.FireModeIndex
             val ammoType = tool.AmmoTypeIndex
+            val list: ArrayBuffer[MessageEnvelope] = ArrayBuffer()
             player.Inventory -= x.start
             obj.FireModeIndex = fireMode
             //TODO any penalty for being handed an OCM version of the tool?
-            events ! AvatarServiceMessage(
-              zone.id,
-              AvatarAction.EquipmentInHand(Service.defaultPlayerGUID, pguid, index, obj)
-            )
+            list.append(MessageEnvelope(zone.id, AvatarAction.EquipmentInHand(pguid, index, obj)))
             if (obj.AmmoTypeIndex != ammoType) {
               obj.AmmoTypeIndex = ammoType
-              events ! AvatarServiceMessage(
-                name,
-                AvatarAction.SendResponse(Service.defaultPlayerGUID, ChangeAmmoMessage(obj.GUID, ammoType))
-              )
+              list.append(MessageEnvelope(name, SendResponse(ChangeAmmoMessage(obj.GUID, ammoType))))
             }
             if (player.DrawnSlot == Player.HandsDownSlot) {
               player.DrawnSlot = index
-              events ! AvatarServiceMessage(
-                zone.id,
-                AvatarAction.ObjectHeld(pguid, index, index)
-              )
+              list.append(MessageEnvelope(zone.id, pguid, AvatarAction.ObjectHeld(index, index)))
             }
+            events ! BundledEnvelope(list)
           }
         case Nil => ; //no replacements found
       }

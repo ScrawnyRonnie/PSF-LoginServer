@@ -2,7 +2,7 @@
 package net.psforever.objects.serverobject.terminals
 
 import akka.actor.ActorRef
-import net.psforever.objects.{GlobalDefinitions, SimpleItem}
+import net.psforever.objects.{GlobalDefinitions, SimpleItem, Tool}
 import net.psforever.objects.serverobject.CommonMessages
 import net.psforever.objects.serverobject.affinity.FactionAffinityBehavior
 import net.psforever.objects.serverobject.damage.Damageable.Target
@@ -12,8 +12,7 @@ import net.psforever.objects.serverobject.repair.{AmenityAutoRepair, RepairableA
 import net.psforever.objects.serverobject.structures.{Building, PoweredAmenityControl}
 import net.psforever.objects.vital.interaction.DamageResult
 import net.psforever.packet.game.HackState1
-import net.psforever.services.Service
-import net.psforever.services.local.{LocalAction, LocalServiceMessage}
+import net.psforever.services.local.support.{HackClearActor, HackClearEnvelope}
 
 /**
   * An `Actor` that handles messages being dispatched to a specific `Terminal`.
@@ -57,7 +56,28 @@ class TerminalControl(term: Terminal)
               )
             case _ => ()
           }
-
+        case CommonMessages.UploadVirus(player, Some(item: Tool), virus)
+          if item.Definition == GlobalDefinitions.trek =>
+          term.Owner match {
+            case _: Building =>
+              sender() ! CommonMessages.Progress(
+                1.66f,
+                GenericHackables.FinishVirusAction(term, player, hackValue = -1, hackClearValue = -1, virus),
+                GenericHackables.HackingTickAction(HackState1.Unk1, player, term, item.GUID)
+              )
+            case _ => ()
+          }
+        case CommonMessages.RemoveVirus(player, Some(item: SimpleItem))
+          if item.Definition == GlobalDefinitions.remote_electronics_kit =>
+          term.Owner match {
+            case _: Building =>
+              sender() ! CommonMessages.Progress(
+                1.66f,
+                GenericHackables.FinishVirusAction(term, player, hackValue = -1, hackClearValue = -1, virus=8L),
+                GenericHackables.HackingTickAction(HackState1.Unk1, player, term, item.GUID)
+              )
+            case _ => ()
+          }
         case _ => ()
       }
 
@@ -79,7 +99,7 @@ class TerminalControl(term: Terminal)
     tryAutoRepair()
     if (term.HackedBy.nonEmpty) {
       val zone = term.Zone
-      zone.LocalEvents ! LocalServiceMessage(zone.id, LocalAction.ClearTemporaryHack(Service.defaultPlayerGUID, term))
+      zone.LocalEvents ! HackClearEnvelope(HackClearActor.ObjectIsResecured(term))
     }
     super.DestructionAwareness(target, cause)
   }
@@ -101,7 +121,7 @@ class TerminalControl(term: Terminal)
     //clear hack state
     if (term.HackedBy.nonEmpty) {
       val zone = term.Zone
-      zone.LocalEvents ! LocalServiceMessage(zone.id, LocalAction.ClearTemporaryHack(Service.defaultPlayerGUID, term))
+      zone.LocalEvents ! HackClearEnvelope(HackClearActor.ObjectIsResecured(term))
     }
   }
 

@@ -2,7 +2,7 @@
 package net.psforever.objects.vital.prop
 
 import net.psforever.objects.ballistics.{AggravatedDamage, ChargeDamage}
-import net.psforever.objects.equipment.JammingUnit
+import net.psforever.objects.equipment.{JammingUnit, TargetValidation}
 import net.psforever.objects.vital.base.{DamageModifiers, DamageType}
 import net.psforever.objects.vital.damage.StandardDamageProfile
 
@@ -21,7 +21,11 @@ trait DamageProperties
   private var damageTypeSecondary: DamageType.Value      = DamageType.None
   /** against Infantry targets, damage does not apply to armor damage */
   private var damageToHealthOnly: Boolean                = false
-  /** against Vehicle targets, damage does not apply to vehicle shield */
+  /** against Infantry targets, damage does not apply to armor damage */
+  private var damageToArmorFirst: Boolean                = false
+  /** against Infantry targets, damage applies to armor before it does health;
+   * regardless of other resistance conditions, non-zero armor is reduced before health;
+   * should not have priority over the flag for infantry health only */
   private var damageToVehicleOnly: Boolean               = false
   /** against battleframe targets, damage does not apply to battleframe robotics shield;
     * this is equivalent to the property "bfr_permeate_shield" */
@@ -33,6 +37,9 @@ trait DamageProperties
     * usually corresponding to a projectile;
     * also used to produce staged projectiles */
   private var damageProxy: List[Int]                   = Nil
+  /** damage proxies are expected to activate upon general detonation
+   * this damage proxy will also activate upon direct hit of these specific types of targets */
+  private var damageProxyOnDirectHit: List[TargetValidation] = Nil
   /** na;
     * currently used with jammer properties only;
     * used sepcifically to indicate jammering effect targets explosive deployables */
@@ -81,6 +88,13 @@ trait DamageProperties
     DamageToHealthOnly
   }
 
+  def DamageToArmorFirst : Boolean = damageToArmorFirst
+
+  def DamageToArmorFirst_=(armorFirst: Boolean) : Boolean = {
+    damageToArmorFirst = armorFirst
+    DamageToArmorFirst
+  }
+
   def DamageToVehicleOnly : Boolean = damageToVehicleOnly
 
   def DamageToVehicleOnly_=(vehicleOnly: Boolean) : Boolean = {
@@ -105,6 +119,18 @@ trait DamageProperties
   def DamageProxy_=(proxyObjectId: List[Int]): List[Int] = {
     damageProxy = proxyObjectId
     DamageProxy
+  }
+
+  def DamageProxyOnDirectHit: List[TargetValidation] = damageProxyOnDirectHit
+
+  def DamageProxyOnDirectHit_=(elem: TargetValidation): List[TargetValidation] = {
+    damageProxyOnDirectHit = List(elem)
+    DamageProxyOnDirectHit
+  }
+
+  def DamageProxyOnDirectHit_=(list: List[TargetValidation]): List[TargetValidation] = {
+    damageProxyOnDirectHit = list
+    DamageProxyOnDirectHit
   }
 
   def AdditionalEffect: Boolean = additionalEffect

@@ -4,9 +4,10 @@ package net.psforever.actors.zone.building
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
 import net.psforever.actors.commands.NtuCommand
-import net.psforever.actors.zone.{BuildingActor, ZoneActor}
+import net.psforever.actors.zone.BuildingActor
 import net.psforever.objects.serverobject.structures.{Amenity, Building, WarpGate}
-import net.psforever.services.galaxy.{GalaxyAction, GalaxyServiceMessage}
+import net.psforever.services.base.envelope.{BundledEnvelope, MessageEnvelope}
+import net.psforever.services.galaxy.GalaxyAction
 import net.psforever.types.PlanetSideEmpire
 import net.psforever.util.Config
 
@@ -122,9 +123,6 @@ case object WarpGateLogic
           }
           updateBroadcastCapabilitiesOfWarpGate(details, wg, setBroadcastTo)
           updateBroadcastCapabilitiesOfWarpGate(details, otherWg, setBroadcastTo)
-          if (wg.Zone.map.cavern && !otherWg.Zone.map.cavern) {
-            otherWg.Zone.actor ! ZoneActor.ZoneMapUpdate()
-          }
 
         case (Some(_), Some(wg : WarpGate), Some(otherWg : WarpGate), None) =>
           handleWarpGateDeadendPair(details, otherWg, wg)
@@ -185,7 +183,7 @@ case object WarpGateLogic
     val pairedWgFaction = pairedWg.Faction
     if (pairedWgFaction != terminalWgFaction) {
       pairedWg.Faction = terminalWgFaction
-      details.galaxyService ! GalaxyServiceMessage(GalaxyAction.MapUpdate(pairedWg.infoUpdateMessage()))
+      details.galaxyService ! MessageEnvelope("", GalaxyAction.MapUpdate(pairedWg.infoUpdateMessage()))
     }
     //the terminal warpgate can not be considered broadcast for other faction
     if (terminalWg.AllowBroadcastFor.contains(pairedWgFaction)) {
@@ -211,9 +209,7 @@ case object WarpGateLogic
       warpgate.Zone.Number, warpgate.MapId, previousAllowances, setBroadcastTo
     )
     warpgate.AllowBroadcastFor = setBroadcastTo
-    (setBroadcastTo ++ previousAllowances).foreach { faction =>
-      events ! GalaxyServiceMessage(faction.toString, msg)
-    }
+    events ! BundledEnvelope((setBroadcastTo ++ previousAllowances).map { faction => MessageEnvelope(faction.toString, msg) })
   }
 
   /**

@@ -8,7 +8,7 @@ import scala.collection.concurrent.TrieMap
 import scala.collection.mutable
 //
 import net.psforever.actors.session.SessionActor
-import net.psforever.objects.{LivePlayerList, Player}
+import net.psforever.objects.{Default, LivePlayerList, Player}
 import net.psforever.objects.teamwork.{Member, Squad, SquadFeatures}
 import net.psforever.objects.avatar.{Avatar, Certification}
 import net.psforever.objects.definition.converter.StatConverter
@@ -176,20 +176,20 @@ class SquadService extends Actor {
 
   def receive: Receive = {
     //subscribe to a faction's channel - necessary to receive updates about listed squads
-    case Service.Join(faction) if SquadService.FactionWordSalad.indexOf(faction) > -1 =>
+    case Service.Join(faction, _) if SquadService.FactionWordSalad.indexOf(faction) > -1 =>
       JoinByFaction(faction, sender())
 
     //subscribe to the player's personal channel - necessary for future and previous squad information
-    case Service.Join(char_id) =>
+    case Service.Join(char_id, _) =>
       JoinByCharacterId(char_id, sender())
 
-    case Service.Leave(Some(faction)) if SquadService.FactionWordSalad.indexOf(faction) > -1 =>
+    case Service.Leave(faction) if SquadService.FactionWordSalad.indexOf(faction) > -1 =>
       LeaveByFaction(faction, sender())
 
-    case Service.Leave(Some(char_id)) =>
+    case Service.Leave(char_id) =>
       LeaveByCharacterId(char_id, sender())
 
-    case Service.Leave(None) | Service.LeaveAll() =>
+    case Service.LeaveAll =>
       LeaveInGeneral(sender())
 
     case Terminated(actorRef) =>
@@ -374,8 +374,9 @@ class SquadService extends Actor {
    */
   def JoinByFaction(faction: String, sender: ActorRef): Unit = {
     val path = s"/$faction/Squad"
-    log.trace(s"$sender has joined $path")
-    subs.SquadEvents.subscribe(sender, path)
+    val routed = SquadStamp.routing(path)
+    log.trace(s"$sender has joined $routed")
+    subs.SquadEvents.subscribe(sender, routed)
   }
 
   /**
@@ -413,8 +414,9 @@ class SquadService extends Actor {
    */
   def LeaveByFaction(faction: String, sender: ActorRef): Unit = {
     val path = s"/$faction/Squad"
-    log.trace(s"$sender has left $path")
-    subs.SquadEvents.unsubscribe(sender, path)
+    val routed = SquadStamp.routing(path)
+    log.trace(s"$sender has left $routed")
+    subs.SquadEvents.unsubscribe(sender, routed)
   }
 
   /**
@@ -591,10 +593,32 @@ class SquadService extends Actor {
         .collect { case leavingPlayer
           if GetParticipatingSquad(leavingPlayer).contains(features) => //kicked player must be in the same squad
           if (actingPlayer == leader) {
-            if (leavingPlayer == leader || squad.Size == 2) {
-              //squad leader is leaving his own squad, so it will be disbanded
-              //OR squad is only composed of two people, so it will be closed-out when one of them leaves
+            if (squad.Size == 2) {
+              //squad is only composed of two people, so it will be closed-out when one of them leaves
               DisbandSquad(features)
+            } else if (leavingPlayer == leader) {
+              //squad leader leaves; promote another member
+              squad.Membership.drop(1).find { _.CharId > 0 } match {
+                case Some(member) =>
+                  //leader was shifted into a subordinate position and will retire from duty
+                  SquadActionMembershipPromote(
+                    leavingPlayer,
+                    member.CharId,
+                    features,
+                    SquadServiceMessage(null, null, SquadAction.Membership(SquadRequestType.Promote, leavingPlayer, Some(member.CharId), member.Name, None)),
+                    Default.Actor
+                  )
+                  import scala.concurrent.duration._
+                  import context.dispatcher
+                  context.system.scheduler.scheduleOnce(500.milliseconds) {
+                    GetParticipatingSquad(leavingPlayer).foreach { updatedFeatures =>
+                      LeaveSquad(leavingPlayer, updatedFeatures)
+                    }
+                  }
+                case _ =>
+                  //the squad will be disbanded
+                  DisbandSquad(features)
+              }
             } else {
               //kicked by the squad leader
               subs.Publish(
@@ -986,7 +1010,7 @@ class SquadService extends Actor {
           memberToSquad.remove(charId)
           member.Name = ""
           member.CharId = 0L
-          subs.SquadEvents.unsubscribe(actor, channel)
+          subs.SquadEvents.unsubscribe(actor, SquadStamp.routing(channel))
           subs.Publish(
             charId,
             SquadResponse.Leave(
@@ -1087,14 +1111,34 @@ class SquadService extends Actor {
         val size = squad.Size
         subs.UserEvents.remove(charId) match {
           case Some(events) =>
-            subs.SquadEvents.unsubscribe(events, s"/${features.ToChannel}/Squad")
+            subs.SquadEvents.unsubscribe(events, SquadStamp.routing(s"/${features.ToChannel}/Squad"))
           case _ => ()
         }
         if (size > 2) {
           GetLeadingSquad(charId, pSquadOpt) match {
             case Some(_) =>
-              //leader of a squad; the squad will be disbanded. Same logic as when a SL uses /leave and the squad is disbanded.
-              DisbandSquad(features)
+              //leader of a squad; search for a suitable substitute leader
+              squad.Membership.drop(1).find { _.CharId > 0 } match {
+                case Some(member) =>
+                  //leader was shifted into a subordinate position and will retire from duty
+                  SquadActionMembershipPromote(
+                    charId,
+                    member.CharId,
+                    features,
+                    SquadServiceMessage(null, null, SquadAction.Membership(SquadRequestType.Promote, charId, Some(member.CharId), member.Name, None)),
+                    Default.Actor
+                  )
+                  import scala.concurrent.duration._
+                  import context.dispatcher
+                  context.system.scheduler.scheduleOnce(500.milliseconds) {
+                    GetParticipatingSquad(charId).foreach { updatedFeatures =>
+                      LeaveSquad(charId, updatedFeatures)
+                    }
+                  }
+                case _ =>
+                  //the squad will be disbanded
+                  DisbandSquad(features)
+              }
             case None =>
               //not the leader of a full squad; tell other members that we are leaving
               SquadSwitchboard.PanicLeaveSquad(

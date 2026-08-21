@@ -11,6 +11,7 @@ import io.circe.parser._
 import net.psforever.objects.{GlobalDefinitions, LocalLockerItem, LocalProjectile}
 import net.psforever.objects.definition.BasicDefinition
 import net.psforever.objects.guid.selector.{NumberSelector, RandomSelector, SpecificSelector}
+import net.psforever.objects.serverobject.dome.{ForceDomeDefinition, ForceDomePhysics}
 import net.psforever.objects.serverobject.doors.{Door, DoorDefinition, SpawnTubeDoor}
 import net.psforever.objects.serverobject.generator.Generator
 import net.psforever.objects.serverobject.llu.{CaptureFlagSocket, CaptureFlagSocketDefinition}
@@ -19,7 +20,7 @@ import net.psforever.objects.serverobject.pad.{VehicleSpawnPad, VehicleSpawnPadD
 import net.psforever.objects.serverobject.painbox.{Painbox, PainboxDefinition}
 import net.psforever.objects.serverobject.resourcesilo.ResourceSilo
 import net.psforever.objects.serverobject.shuttle.OrbitalShuttlePad
-import net.psforever.objects.serverobject.structures.{Building, BuildingDefinition, FoundationBuilder, StructureType, WarpGate}
+import net.psforever.objects.serverobject.structures.{Building, BuildingDefinition, FoundationBuilder, StructureType, VirtualTrainingTeleporter, WarpGate}
 import net.psforever.objects.serverobject.terminals.capture.{CaptureTerminal, CaptureTerminalDefinition}
 import net.psforever.objects.serverobject.terminals.implant.{ImplantTerminalInterface, ImplantTerminalMech}
 import net.psforever.objects.serverobject.tube.SpawnTube
@@ -100,17 +101,9 @@ object Zones {
     "PathPoints"
   )(ZipLinePath.apply)
 
-  // monolith, hst, warpgate are ignored for now as the scala code isn't ready to handle them.
   // BFR terminals/doors are ignored as top level elements as sanctuaries have them with no associated building. (repair_silo also has this problem, but currently is ignored in the AmenityExtrator project)
   // Force domes have GUIDs but are currently classed as separate entities. The dome is controlled by sending GOAM 44 / 48 / 52 to the building GUID
-  private val ignoredEntities = Seq(
-    "monolith",
-    "force_dome_dsp_physics",
-    "force_dome_comm_physics",
-    "force_dome_cryo_physics",
-    "force_dome_tech_physics",
-    "force_dome_amp_physics"
-  )
+  private val ignoredEntities = Seq("monolith")
 
   private val towerTypes    = Seq("tower_a", "tower_b", "tower_c")
   private val facilityTypes = Seq("amp_station", "cryo_facility", "comm_station", "comm_station_dsp", "tech_plant")
@@ -120,12 +113,21 @@ object Zones {
     "orbital_building_vs",
     "orbital_building_tr",
     "orbital_building_nc",
+    "vr_training",
+    "vt_air_vehicle",
     "VT_building_vs",
     "VT_building_tr",
     "VT_building_nc",
     "vt_dropship",
     "vt_spawn",
     "vt_vehicle"
+  )
+  private val forceDomeTypes = Seq(
+    "force_dome_dsp_physics",
+    "force_dome_comm_physics",
+    "force_dome_cryo_physics",
+    "force_dome_tech_physics",
+    "force_dome_amp_physics"
   )
   private val cavernBuildingTypes = Seq(
     "ceiling_bldg_a",
@@ -156,7 +158,7 @@ object Zones {
     "vanu_vehicle_station"
   )
   private val basicTerminalTypes =
-    Seq("order_terminal", "spawn_terminal", "cert_terminal", "order_terminal", "vanu_equipment_term")
+    Seq("order_terminal", "spawn_terminal", "cert_terminal", "order_terminal", "vanu_equipment_term", "main_terminal")
   private val spawnPadTerminalTypes = Seq(
     "ground_vehicle_terminal",
     "air_vehicle_terminal",
@@ -345,6 +347,15 @@ object Zones {
                     ),
                     owningBuildingGuid = buildingGuid
                   )
+                  //health module slowly heals friendly players in the soi
+                  zoneMap.addLocalObject(
+                    buildingGuid + 2,
+                    ProximityTerminal.Constructor(
+                      structure.position,
+                      GlobalDefinitions.medical_terminal_healing_module
+                    ),
+                    owningBuildingGuid = buildingGuid
+                  )
                 }
             }
             val filteredZoneEntities =
@@ -371,11 +382,27 @@ object Zones {
 
           createObjects(
             zoneMap,
-            zoneObjects.filterNot { _.objectType.startsWith("bfr_") },
+            zoneObjects.filterNot { obj => obj.objectType.startsWith("bfr_") || forceDomeTypes.contains(obj.objectType) },
             ownerGuid = 0,
             None,
             turretWeaponGuid
           )
+          //force dome physics objects have no owner
+          //for our benefit, we can attach them as amenities to the zone's capitol facility
+          zoneObjects
+            .find { obj => forceDomeTypes.contains(obj.objectType) }
+            .foreach { forceDome =>
+              structures
+                .find { structure => Building.Capitols.contains(structure.objectName) }
+                .foreach { structure =>
+                  val definition = DefinitionUtil.fromString(forceDome.objectType).asInstanceOf[ForceDomeDefinition]
+                  zoneMap.addLocalObject(
+                    forceDome.guid,
+                    ForceDomePhysics.Constructor(definition),
+                    owningBuildingGuid = structure.guid
+                  )
+                }
+            }
 
           lattice.asObject.get(mapid).foreach { obj =>
             obj.asArray.get.foreach { entry =>
@@ -557,7 +584,7 @@ object Zones {
 
         case "adv_med_terminal" | "repair_silo" | "pad_landing_frame" | "pad_landing_tower_frame" | "medical_terminal" |
             "crystals_health_a" | "crystals_health_b" | "crystals_repair_a" | "crystals_repair_b" | "crystals_vehicle_a" |
-            "crystals_vehicle_b" | "crystals_energy_a" | "crystals_energy_b" =>
+            "crystals_vehicle_b" | "crystals_energy_a" | "crystals_energy_b" | "medical_terminal_healing_module" =>
           zoneMap.addLocalObject(
             obj.guid,
             ProximityTerminal
@@ -699,9 +726,12 @@ object Zones {
             )
           zoneMap.linkShuttleToBay(obj.guid)
 
+        case "spawn_pad" | "spawn_zone" =>
+          zoneMap
+            .addLocalObject(obj.guid, VirtualTrainingTeleporter.Constructor(obj.position))
+
         case _ => ()
       }
-
     }
   }
 
@@ -756,10 +786,12 @@ object Zones {
             this.HotSpotCoordinateFunction = Zones.HotSpots.standardRemapping(info.map.scale, info.map.hotSpotSpan, info.map.hotSpotSpan)
             this.HotSpotTimeFunction = Zones.HotSpots.standardTimeRules
             Zones.initZoneAmenities(zone = this)
+          } else {
+            Zones.initZoneAmenities(zone = this)
           }
 
           //special conditions
-          //1. sanctuaries are completely owned by a single faction
+          //1. sanctuaries and VR training zones are completely owned by a single faction
           //2. set up the third warp gate on sanctuaries to be a broadcast warp gate
           //3. set up sanctuary-linked warp gates on "home continents" (the names make no sense anymore, don't even ask)
           //4. assign the caverns internally
@@ -809,6 +841,12 @@ object Zones {
               bldgs.filter(_.Name.startsWith("WG_")).map {
                 case gate: WarpGate => gate.AllowBroadcastFor = PlanetSideEmpire.VS
               }
+            case "tzshtr" | "tzdrtr" | "tzcotr" =>
+              bldgs.foreach(_.Faction = PlanetSideEmpire.TR)
+            case "tzshnc" | "tzdrnc" | "tzconc" =>
+              bldgs.foreach(_.Faction = PlanetSideEmpire.NC)
+            case "tzshvs" | "tzdrvs" | "tzcovs" =>
+              bldgs.foreach(_.Faction = PlanetSideEmpire.VS)
             case "i4" =>
               bldgs.find(_.Name.equals("Map96_Gate_Three")).map {
                 case gate: WarpGate => gate.Active = false

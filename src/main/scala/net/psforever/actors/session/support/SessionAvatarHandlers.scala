@@ -7,8 +7,9 @@ import net.psforever.objects.{Default, PlanetSideGameObject, Player, Vehicle}
 import net.psforever.objects.sourcing.{PlayerSource, SourceEntry, UniquePlayer}
 import net.psforever.packet.game.objectcreate.ConstructorData
 import net.psforever.objects.zones.exp
-import net.psforever.services.Service
-import net.psforever.services.avatar.{AvatarAction, AvatarServiceMessage, AvatarServiceResponse}
+import net.psforever.services.avatar.{AvatarAction, AvatarStamp}
+import net.psforever.services.base.envelope.{GenericResponseEnvelope, MessageEnvelope}
+import net.psforever.services.base.message.SendResponse
 import net.psforever.services.chat.OutfitChannel
 
 import scala.collection.mutable
@@ -16,14 +17,11 @@ import scala.collection.mutable
 import net.psforever.actors.session.AvatarActor
 import net.psforever.packet.game.objectcreate.ObjectCreateMessageParent
 import net.psforever.packet.game._
-import net.psforever.services.avatar.AvatarResponse
 import net.psforever.types._
 import net.psforever.util.Config
 
-trait AvatarHandlerFunctions extends CommonSessionInterfacingFunctionality {
+trait AvatarHandlerFunctions extends CommonSessionInterfacingFunctionality with CommonHandlerFunctions {
   val ops: SessionAvatarHandlers
-
-  def handle(toChannel: String, guid: PlanetSideGUID, reply: AvatarResponse.Response): Unit
 }
 
 class SessionAvatarHandlers(
@@ -36,7 +34,7 @@ class SessionAvatarHandlers(
     mutable.LongMap[SessionAvatarHandlers.LastUpstream]()
   private[session] val hidingPlayerRandomizer = new scala.util.Random
 
-  def changeAmmoProcedures(
+  def changeAmmoProcedure(
                                     weaponGuid: PlanetSideGUID,
                                     previousAmmoGuid: PlanetSideGUID,
                                     ammoTypeId: Int,
@@ -45,7 +43,7 @@ class SessionAvatarHandlers(
                                     ammoData: ConstructorData
                                   ): Unit = {
     sendResponse(ObjectDetachMessage(weaponGuid, previousAmmoGuid, Vector3.Zero, 0))
-    //TODO? sendResponse(ObjectDeleteMessage(previousAmmoGuid, 0))
+    sendResponse(ObjectDeleteMessage(previousAmmoGuid, 0))
     sendResponse(
       ObjectCreateMessage(
         ammoTypeId,
@@ -82,7 +80,7 @@ class SessionAvatarHandlers(
             maxCepList.lift(squadSize - 1).getOrElse(squadSize * maxCepList.head).toLong
           }
           val groupContribution: Float = squadUI
-            .map { case (id, _) => (id, squadParticipation.getOrElse(id, 0f) / 10f) }
+            .map { case (id, _) => (id, squadParticipation.getOrElse(id, 0f)) }
             .values
             .max
           val modifiedExp: Long = (cep.toFloat * groupContribution).toLong
@@ -97,7 +95,7 @@ class SessionAvatarHandlers(
           } else {
             cappedModifiedExp
           }
-          exp.ToDatabase.reportFacilityCapture(charId, buildingId, zoneNumber, finalExp, expType="cep")
+          exp.ToDatabase.reportFacilityCapture(charId, zoneNumber, buildingId, finalExp, expType="cep")
           avatarActor ! AvatarActor.AwardCep(finalExp)
           Some(finalExp)
 
@@ -115,9 +113,10 @@ class SessionAvatarHandlers(
             }
           }
           val modifiedExp = (cep * individualContribution).toLong
-          exp.ToDatabase.reportFacilityCapture(charId, buildingId, zoneNumber, modifiedExp, expType="bep")
-          avatarActor ! AvatarActor.AwardFacilityCaptureBep(modifiedExp)
-          Some(modifiedExp)
+          val finalBep = math.min(modifiedExp, 2250L) // 2250 max bep for capture
+          exp.ToDatabase.reportFacilityCapture(charId, zoneNumber, buildingId, finalBep, expType="bep")
+          avatarActor ! AvatarActor.AwardFacilityCaptureBep(finalBep)
+          Some(finalBep)
       }
   }
 
@@ -139,7 +138,7 @@ class SessionAvatarHandlers(
       val playersInZone = killer.Zone.Players.map { avatar => (avatar.id, avatar.basic.name) }
       val squadMembersHere = playersInZone.filter(member => squadMembers.contains(member._2))
       squadMembersHere.foreach { member =>
-        killer.Zone.AvatarEvents ! AvatarServiceMessage(
+        killer.Zone.AvatarEvents ! MessageEnvelope(
           member._2,
           AvatarAction.AwardBep(member._1, expSplit, ExperienceType.Normal))
       }
@@ -154,7 +153,7 @@ class SessionAvatarHandlers(
       val playersInZone = vehicle.Zone.Players.map { avatar => (avatar.id, avatar.basic.name) }
       val squadMembersHere = playersInZone.filter(member => squadMembers.contains(member._2))
       squadMembersHere.foreach { member =>
-        vehicle.Zone.AvatarEvents ! AvatarServiceMessage(
+        vehicle.Zone.AvatarEvents ! MessageEnvelope(
           member._2,
           AvatarAction.AwardBep(member._1, exp, ExperienceType.Normal))
       }
@@ -200,31 +199,22 @@ class SessionAvatarHandlers(
     )
   }
 
-  def revive(revivalTargetGuid: PlanetSideGUID): Unit = {
+  def revive(): Unit = {
     val spawn = sessionLogic.zoning.spawn
     spawn.reviveTimer.cancel()
     spawn.reviveTimer = Default.Cancellable
     spawn.respawnTimer.cancel()
     spawn.respawnTimer = Default.Cancellable
-    player.Revive
-    val health = player.Health
-    sendResponse(PlanetsideAttributeMessage(revivalTargetGuid, attribute_type=0, health))
-    sendResponse(AvatarDeadStateMessage(DeadState.Alive, timer_max=0, timer=0, player.Position, player.Faction, unk5=true))
-    continent.AvatarEvents ! AvatarServiceMessage(
-      continent.id,
-      AvatarAction.PlanetsideAttributeToAll(revivalTargetGuid, attribute_type=0, health)
-    )
   }
 
   def killedWhileMounted(obj: PlanetSideGameObject with Mountable, playerGuid: PlanetSideGUID): Unit = {
     val playerName = player.Name
     //boot cadaver from mount on client
-    context.self ! AvatarServiceResponse(
+    context.self ! GenericResponseEnvelope(
+      AvatarStamp,
       playerName,
-      Service.defaultPlayerGUID,
-      AvatarResponse.SendResponse(
-        ObjectDetachMessage(obj.GUID, playerGuid, player.Position, Vector3.Zero)
-      )
+      Default.GUID0,
+      SendResponse(ObjectDetachMessage(obj.GUID, playerGuid, player.Position, Vector3.Zero))
     )
     //player no longer seated
     obj.PassengerInSeat(player).foreach { seatNumber =>
@@ -246,7 +236,7 @@ class SessionAvatarHandlers(
 
 object SessionAvatarHandlers {
   private[session] case class LastUpstream(
-                                            msg: Option[AvatarResponse.PlayerState],
+                                            msg: Option[AvatarAction.PlayerState],
                                             visible: Boolean,
                                             shooting: Option[PlanetSideGUID],
                                             time: Long

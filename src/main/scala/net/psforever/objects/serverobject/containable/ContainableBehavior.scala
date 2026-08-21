@@ -2,7 +2,7 @@
 package net.psforever.objects.serverobject.containable
 
 import akka.actor.{Actor, ActorRef}
-import akka.pattern.{AskTimeoutException, ask}
+import akka.pattern.ask
 import akka.util.Timeout
 import net.psforever.objects.equipment.{Equipment, EquipmentSize}
 import net.psforever.objects.inventory.{Container, InventoryItem}
@@ -196,10 +196,11 @@ trait ContainableBehavior {
 
               case _ => ; //TODO what?
             }
-            //always do this
-            moveItemOver
-              .recover { case _: AskTimeoutException => destination.Actor ! ContainableBehavior.Resume() }
-              .onComplete { _ => destination.Actor ! ContainableBehavior.Resume() }
+            /* Exactly one Resume answers the Wait() above, and onComplete alone delivers it
+               for both success and failure -- including an AskTimeoutException. A second
+               Resume would release an unrelated concurrent move's guard and let insertions
+               interleave with a move that is still in flight. */
+            moveItemOver.onComplete { _ => destination.Actor ! ContainableBehavior.Resume() }
           }
         case _ => ;
         //we could not find the item to be moved in the source location; trying to act on old data?
@@ -680,6 +681,19 @@ object ContainableBehavior {
       objDef == GlobalDefinitions.router_telepad ||
       entry.obj.isInstanceOf[BoomerTrigger] ||
       (faction != tplayer.Faction && faction != PlanetSideEmpire.NEUTRAL)
+    }
+
+  /**
+    * Same as above except the terminal used is from a facility that has cavern equipment benefit
+    * so allow cavern equipment to be kept
+    */
+  def DropPredicateEquipmentBenefit(tplayer: Player): InventoryItem => Boolean =
+    entry => {
+      val objDef  = entry.obj.Definition
+      val faction = GlobalDefinitions.isFactionEquipment(objDef)
+        objDef == GlobalDefinitions.router_telepad ||
+        entry.obj.isInstanceOf[BoomerTrigger] ||
+        (faction != tplayer.Faction && faction != PlanetSideEmpire.NEUTRAL)
     }
 }
 

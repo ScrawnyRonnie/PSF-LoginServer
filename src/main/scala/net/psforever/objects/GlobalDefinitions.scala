@@ -1,6 +1,7 @@
 // Copyright (c) 2017 PSForever
 package net.psforever.objects
 
+import net.psforever.objects.avatar.Certification
 import net.psforever.objects.ballistics._
 import net.psforever.objects.ce.DeployedItem
 import net.psforever.objects.definition._
@@ -8,6 +9,7 @@ import net.psforever.objects.definition.converter._
 import net.psforever.objects.equipment._
 import net.psforever.objects.global.{GlobalDefinitionsAmmo, GlobalDefinitionsBuilding, GlobalDefinitionsDeployable, GlobalDefinitionsExoSuit, GlobalDefinitionsImplant, GlobalDefinitionsKit, GlobalDefinitionsMiscellaneous, GlobalDefinitionsProjectile, GlobalDefinitionsTool, GlobalDefinitionsVehicle}
 import net.psforever.objects.locker.LockerContainerDefinition
+import net.psforever.objects.serverobject.dome.ForceDomeDefinition
 import net.psforever.objects.serverobject.doors.DoorDefinition
 import net.psforever.objects.serverobject.generator.GeneratorDefinition
 import net.psforever.objects.serverobject.locks.IFFLockDefinition
@@ -17,7 +19,7 @@ import net.psforever.objects.serverobject.painbox.PainboxDefinition
 import net.psforever.objects.serverobject.terminals._
 import net.psforever.objects.serverobject.tube.SpawnTubeDefinition
 import net.psforever.objects.serverobject.resourcesilo.ResourceSiloDefinition
-import net.psforever.objects.serverobject.structures.{AmenityDefinition, BuildingDefinition, WarpGateDefinition}
+import net.psforever.objects.serverobject.structures.{AmenityDefinition, BuildingDefinition, VirtualTrainingTeleporterDefinition, WarpGateDefinition}
 import net.psforever.objects.serverobject.terminals.capture.CaptureTerminalDefinition
 import net.psforever.objects.serverobject.terminals.implant.ImplantTerminalMechDefinition
 import net.psforever.objects.serverobject.turret.FacilityTurretDefinition
@@ -44,6 +46,96 @@ object GlobalDefinitions {
   avatar.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
   avatar.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
   avatar.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot = new AvatarBotDefinition(122)
+  avatar_bot.MaxHealth = 100
+  avatar_bot.Damageable = true
+  avatar_bot.DrownAtMaxDepth = true
+  avatar_bot.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_agile = new AvatarBotDefinition(123)
+  avatar_bot_agile.MaxHealth = 100
+  avatar_bot_agile.Damageable = true
+  avatar_bot_agile.DrownAtMaxDepth = true
+  avatar_bot_agile.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_agile.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_agile.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_agile.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_agile.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_agile_no_weapon = new AvatarBotDefinition(124)
+  avatar_bot_agile_no_weapon.MaxHealth = 100
+  avatar_bot_agile_no_weapon.Damageable = true
+  avatar_bot_agile_no_weapon.DrownAtMaxDepth = true
+  avatar_bot_agile_no_weapon.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_agile_no_weapon.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_agile_no_weapon.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_agile_no_weapon.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_agile_no_weapon.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_max = new AvatarBotDefinition(125)
+  avatar_bot_max.MaxHealth = 100
+  avatar_bot_max.Damageable = true
+  avatar_bot_max.DrownAtMaxDepth = true
+  avatar_bot_max.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_max.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_max.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_max.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_max.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_max_no_weapon = new AvatarBotDefinition(126)
+  avatar_bot_max_no_weapon.MaxHealth = 100
+  avatar_bot_max_no_weapon.Damageable = true
+  avatar_bot_max_no_weapon.DrownAtMaxDepth = true
+  avatar_bot_max_no_weapon.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_max_no_weapon.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_max_no_weapon.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_max_no_weapon.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_max_no_weapon.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_reinforced = new AvatarBotDefinition(127)
+  avatar_bot_reinforced.MaxHealth = 100
+  avatar_bot_reinforced.Damageable = true
+  avatar_bot_reinforced.DrownAtMaxDepth = true
+  avatar_bot_reinforced.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_reinforced.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_reinforced.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_reinforced.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_reinforced.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_reinforced_no_weapon = new AvatarBotDefinition(128)
+  avatar_bot_reinforced_no_weapon.MaxHealth = 100
+  avatar_bot_reinforced_no_weapon.Damageable = true
+  avatar_bot_reinforced_no_weapon.DrownAtMaxDepth = true
+  avatar_bot_reinforced_no_weapon.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_reinforced_no_weapon.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_reinforced_no_weapon.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_reinforced_no_weapon.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_reinforced_no_weapon.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_standard = new AvatarBotDefinition(129)
+  avatar_bot_standard.MaxHealth = 100
+  avatar_bot_standard.Damageable = true
+  avatar_bot_standard.DrownAtMaxDepth = true
+  avatar_bot_standard.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_standard.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_standard.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_standard.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_standard.maxForwardSpeed = 27f //not in the ADB; running speed
+
+  val avatar_bot_standard_no_weapon = new AvatarBotDefinition(130)
+  avatar_bot_standard_no_weapon.MaxHealth = 100
+  avatar_bot_standard_no_weapon.Damageable = true
+  avatar_bot_standard_no_weapon.DrownAtMaxDepth = true
+  avatar_bot_standard_no_weapon.MaxDepth = 1.609375f //Male, standing, not MAX
+  avatar_bot_standard_no_weapon.UnderwaterLifespan(suffocation = 60000L, recovery = 10000L)
+  avatar_bot_standard_no_weapon.collision.xy = CollisionXYData(Array((0.1f, 0), (0.2f, 5), (0.50f, 15), (0.75f, 20), (1f, 30))) //not in the ADB
+  avatar_bot_standard_no_weapon.collision.z = CollisionZData(Array((0.1f, 0), (5f, 1), (10f, 3), (20f, 5), (35f, 7), (50f, 10), (75f, 40), (100f, 100))) //not in the ADB
+  avatar_bot_standard_no_weapon.maxForwardSpeed = 27f //not in the ADB; running speed
 
   /*
   exo-suits
@@ -1125,6 +1217,8 @@ object GlobalDefinitions {
 
   val medical_terminal = new MedicalTerminalDefinition(529)
 
+  val medical_terminal_healing_module = new MedicalTerminalDefinition(530)
+
   val portable_med_terminal = new MedicalTerminalDefinition(689)
 
   val pad_landing_frame = new MedicalTerminalDefinition(618)
@@ -1239,6 +1333,8 @@ object GlobalDefinitions {
 
   val vanu_control_console = new CaptureTerminalDefinition(930) // Cavern CC
 
+  val main_terminal = new MainTerminalDefinition(473)
+
   val llm_socket = new CaptureFlagSocketDefinition()
 
   val capture_flag = new CaptureFlagDefinition()
@@ -1276,11 +1372,27 @@ object GlobalDefinitions {
 
   val obbasemesh: AmenityDefinition = new AmenityDefinition(598) {}
 
+  val spawn_pad = new VirtualTrainingTeleporterDefinition()
+
+  val spawn_zone = new VirtualTrainingTeleporterDefinition()
+
   val targeting_laser_dispenser = new OrderTerminalDefinition(851)
 
   val stationaryteleportpad = new GenericTeleportationDefinition(836)
 
   val zipline = new GenericTeleportationDefinition(1047)
+
+  val force_dome_generator = new ForceDomeDefinition(322)
+
+  val force_dome_amp_physics = new ForceDomeDefinition(313)
+
+  val force_dome_comm_physics = new ForceDomeDefinition(316)
+
+  val force_dome_cryo_physics = new ForceDomeDefinition(319)
+
+  val force_dome_dsp_physics = new ForceDomeDefinition(321)
+
+  val force_dome_tech_physics = new ForceDomeDefinition(323)
 
   /*
   Buildings
@@ -1371,6 +1483,10 @@ object GlobalDefinitions {
   val orbital_building_tr =  new BuildingDefinition(606)
 
   val orbital_building_vs =  new BuildingDefinition(607)
+
+  val vr_training         =  new BuildingDefinition(955)
+
+  val vt_air_vehicle      =  new BuildingDefinition(976)
 
   val VT_building_nc      =  new BuildingDefinition(978)
 
@@ -2054,6 +2170,19 @@ object GlobalDefinitions {
             Nil
         }
       }
+  }
+
+  /**
+    * Engineering certifications to temporarily apply to the avatar in VR Training zones.
+    * @return the set of certifications to apply.
+    */
+  def vrZoneTempEngineeringCerts(): Set[Certification] = {
+    Set[Certification](
+        Certification.AdvancedEngineering,
+        Certification.AdvancedHacking,
+        Certification.CombatEngineering,
+        Certification.GroundSupport
+    )
   }
 
   GlobalDefinitionsImplant.init()

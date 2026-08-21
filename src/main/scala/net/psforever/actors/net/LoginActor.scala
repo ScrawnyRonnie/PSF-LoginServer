@@ -85,7 +85,6 @@ class LoginActor(middlewareActor: typed.ActorRef[MiddlewareActor.Command], conne
     with MDCContextAware {
   import scala.concurrent.ExecutionContext.Implicits.global
 
-  //private val usernameRegex: Regex = """[A-Za-z\d]{3,}""".r might be useful one day
   private var accountIntermediary: ActorRef = Default.Actor
   private var sockets: typed.ActorRef[SocketPane.Command] = Default.typed.Actor
 
@@ -126,14 +125,13 @@ class LoginActor(middlewareActor: typed.ActorRef[MiddlewareActor.Command], conne
     case _ => ()
   }
 
- private def beforeLoginBehavior: Receive = persistentSetupMixinBehavior.orElse {
-   case ReceiveIPAddress(address) =>
-     ipAddress = address.Address
-     hostName = address.HostName
-     canonicalHostName = address.CanonicalHostName
-     port = address.Port
-     context.become(idlingBehavior)
-     runLoginTest()
+  private def beforeLoginBehavior: Receive = persistentSetupMixinBehavior.orElse {
+    case ReceiveIPAddress(address) =>
+      ipAddress = address.Address
+      hostName = address.HostName
+      canonicalHostName = address.CanonicalHostName
+      port = address.Port
+      context.become(accountLoginBehavior) // Proceed directly to account login behavior without test
 
     case _ => ()
   }
@@ -182,13 +180,11 @@ class LoginActor(middlewareActor: typed.ActorRef[MiddlewareActor.Command], conne
       case LoginMessage(majorVersion, minorVersion, buildDate, username, _, Some(token), revision) =>
         val clientVersion = s"Client Version: $majorVersion.$minorVersion.$revision, $buildDate"
         log.debug(s"New login UN:$username Token:$token. $clientVersion")
-        context.become(idlingBehavior)
         accountLoginWithToken(token)
 
       case LoginMessage(majorVersion, minorVersion, buildDate, username, password, None, revision) =>
         val clientVersion = s"Client Version: $majorVersion.$minorVersion.$revision, $buildDate"
         log.debug(s"New login UN:$username. $clientVersion")
-        context.become(idlingBehavior)
         accountLogin(username, password.getOrElse(""))
 
       case _ =>
@@ -206,31 +202,6 @@ class LoginActor(middlewareActor: typed.ActorRef[MiddlewareActor.Command], conne
 
       case _ =>
         log.warning(s"Unhandled GamePacket $pkt")
-    }
-  }
-
-  private def runLoginTest(): Unit = {
-    import ctx._
-    val result = for {
-      accountsExact <- ctx.run(query[persistence.Account].filter(_.username == lift("PSForever")))
-      accountOption <- accountsExact.headOption match {
-        case Some(account) =>
-          Future.successful(Some(account))
-        case None =>
-          Future.successful(None)
-      }
-    } yield accountOption
-
-    result.onComplete {
-      case Success(Some(_)) =>
-        context.become(accountLoginBehavior) // account found
-      case Success(None) =>
-        middlewareActor ! MiddlewareActor.Send(DisconnectMessage("Character database not found; stopping ..."))
-        middlewareActor ! MiddlewareActor.Close()
-      case Failure(e) =>
-        log.error(e.getMessage)
-        middlewareActor ! MiddlewareActor.Send(DisconnectMessage("Encountered login error; stopping ..."))
-        middlewareActor ! MiddlewareActor.Close()
     }
   }
 

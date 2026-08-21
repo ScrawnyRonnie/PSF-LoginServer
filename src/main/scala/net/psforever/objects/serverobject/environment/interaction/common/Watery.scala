@@ -6,7 +6,7 @@ import net.psforever.objects.serverobject.PlanetSideServerObject
 import net.psforever.objects.serverobject.environment.interaction.InteractWithEnvironment
 import net.psforever.objects.serverobject.environment.interaction.common.Watery.OxygenStateTarget
 import net.psforever.objects.serverobject.environment.{EnvironmentAttribute, EnvironmentTrait, PieceOfEnvironment}
-import net.psforever.objects.zones.InteractsWithZone
+import net.psforever.objects.zones.interaction.InteractsWithZone
 import net.psforever.types.{OxygenState, PlanetSideGUID}
 
 trait Watery {
@@ -152,7 +152,7 @@ object Watery {
         val oldTimeRemaining: Long = math.max(0, completionTime - System.currentTimeMillis())
         val oldTimeRatio: Float = oldTimeRemaining / oldDuration.toFloat
         val percentage: Float = oldTimeRatio * 100
-        val recoveryTime: Long = newDuration * (1f - oldTimeRatio).toLong
+        val recoveryTime: Long = (newDuration * (1f - oldTimeRatio)).toLong
         (true, recoveryTime, percentage)
       case Some(OxygenState.Recovery) =>
         //interrupted while recovering, calculate the progress and keep recovering
