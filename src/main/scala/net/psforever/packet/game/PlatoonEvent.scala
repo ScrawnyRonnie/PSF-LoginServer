@@ -1,4 +1,4 @@
-// Copyright (c) 2025 PSForever
+// Copyright (c) 2026 PSForever
 package net.psforever.packet.game
 
 import net.psforever.packet.GamePacketOpcode.Type
